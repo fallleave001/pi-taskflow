@@ -79,12 +79,14 @@ function mergePhaseState(
 		.map((r, i) => `### [${i + 1}/${results.length}] ${r.agent}${isFailed(r) ? " (failed)" : ""}\n\n${r.output}`)
 		.join("\n\n---\n\n");
 	const jsonArray = parseJson ? results.map((r) => safeParse(r.output) ?? r.output) : undefined;
+	const failedCount = results.filter(isFailed).length;
 	return {
 		id,
 		status: anyFailed ? "failed" : "done",
 		output: combinedText,
 		json: jsonArray,
 		usage,
+		subProgress: { done: results.length, total: results.length, running: 0, failed: failedCount },
 		error: anyFailed ? results.filter(isFailed).map((r) => `${r.agent}: ${r.errorMessage ?? r.stderr}`).join("; ") : undefined,
 		inputHash,
 		endedAt: Date.now(),

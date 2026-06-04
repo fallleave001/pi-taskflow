@@ -117,13 +117,22 @@ function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme): st
 
 	if (ps.status === "skipped") return theme.fg("muted", "skipped · upstream failed");
 
+	const isFanout = type === "map" || type === "parallel";
+
 	if (ps.status === "failed") {
 		const e = (ps.error ?? "failed").replace(/\s+/g, " ");
-		const snip = e.length > 64 ? `${e.slice(0, 64)}…` : e;
+		const snip = e.length > 56 ? `${e.slice(0, 56)}…` : e;
+		if (isFanout && ps.subProgress) {
+			const { done, total, failed } = ps.subProgress;
+			return (
+				theme.fg("toolOutput", `${done - failed}/${total}`) +
+				theme.fg("error", ` ${failed}✗`) +
+				(snip ? theme.fg("error", `  ${snip}`) : "")
+			);
+		}
 		return theme.fg("error", snip);
 	}
 
-	const isFanout = type === "map" || type === "parallel";
 	const t = phaseElapsed(ps);
 	const time = t ? theme.fg("dim", elapsed(t)) : "";
 

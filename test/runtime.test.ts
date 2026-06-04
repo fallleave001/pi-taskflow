@@ -99,6 +99,8 @@ test("runtime: map fan-out spawns one task per array item", async () => {
 	assert.ok(record.includes("process y"));
 	assert.ok(record.includes("process z"));
 	assert.match(res.finalOutput, /done:process x/);
+	// completed fan-out must carry final sub-task counts (regression: showed 0✓)
+	assert.deepEqual(res.state.phases.work.subProgress, { done: 3, total: 3, running: 0, failed: 0 });
 });
 
 test("runtime: parallel branches run and merge", async () => {
