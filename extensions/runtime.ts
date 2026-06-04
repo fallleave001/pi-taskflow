@@ -96,6 +96,7 @@ async function executePhase(
 	state: RunState,
 	deps: RuntimeDeps,
 	prior: PhaseState | undefined,
+	emitProgress: () => void,
 ): Promise<PhaseState> {
 	const type = phase.type ?? "agent";
 	const concurrency = phase.concurrency ?? state.def.concurrency ?? 8;
@@ -120,6 +121,31 @@ async function executePhase(
 
 	const parseJson = phase.output === "json";
 
+	// Runs a list of sub-tasks with live fan-out progress reported on the live phase state.
+	const runFanout = async (
+		items: Array<{ agent: string; task: string }>,
+	): Promise<RunResult[]> => {
+		let done = 0;
+		let running = 0;
+		let failed = 0;
+		const total = items.length;
+		const live = state.phases[phase.id];
+		if (live) live.subProgress = { done: 0, total, running: 0, failed: 0 };
+		emitProgress();
+		return mapWithConcurrencyLimit(items, concurrency, async (it) => {
+			running++;
+			if (live) live.subProgress = { done, total, running, failed };
+			emitProgress();
+			const r = await runOne(it.agent, it.task);
+			running--;
+			done++;
+			if (isFailed(r)) failed++;
+			if (live) live.subProgress = { done, total, running, failed };
+			emitProgress();
+			return r;
+		});
+	};
+
 	if (type === "agent" || type === "gate") {
 		const ctx = buildInterpolationContext(state, previousOutput);
 		const { text } = interpolate(phase.task ?? "", ctx);
@@ -141,7 +167,7 @@ async function executePhase(
 		const cached = cachedPhase(prior, inputHash);
 		if (cached) return cached;
 
-		const results = await mapWithConcurrencyLimit(branches, concurrency, (b) => runOne(b.agent, b.task));
+		const results = await runFanout(branches);
 		return mergePhaseState(phase.id, results, inputHash, parseJson);
 	}
 
@@ -172,7 +198,7 @@ async function executePhase(
 		const cached = cachedPhase(prior, inputHash);
 		if (cached) return cached;
 
-		const results = await mapWithConcurrencyLimit(tasks, concurrency, (t) => runOne(t.agent, t.task));
+		const results = await runFanout(tasks);
 		return mergePhaseState(phase.id, results, inputHash, parseJson);
 	}
 
@@ -273,7 +299,7 @@ export async function executeTaskflow(state: RunState, deps: RuntimeDeps): Promi
 			};
 			deps.onProgress?.(state);
 
-			const ps = await executePhase(phase, state, deps, prior);
+			const ps = await executePhase(phase, state, deps, prior, () => deps.onProgress?.(state));
 			state.phases[phase.id] = ps;
 			deps.persist?.(state);
 			deps.onProgress?.(state);

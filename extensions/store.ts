@@ -33,6 +33,8 @@ export interface PhaseState {
 	inputHash?: string;
 	startedAt?: number;
 	endedAt?: number;
+	/** Live fan-out progress for map/parallel phases. */
+	subProgress?: { done: number; total: number; running: number; failed: number };
 }
 
 export interface RunState {
