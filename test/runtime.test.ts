@@ -291,3 +291,24 @@ test("runtime: gate PASS lets the flow continue", async () => {
 	assert.equal(res.state.phases.check.gate?.verdict, "pass");
 	assert.equal(res.state.phases.ship.status, "done");
 });
+
+test("runtime: completed phases retain startedAt (run elapsed regression)", async () => {
+	const def: Taskflow = {
+		name: "timed",
+		phases: [
+			{ id: "one", type: "agent", agent: "a", task: "start" },
+			{ id: "two", type: "agent", agent: "a", task: "use {steps.one.output}", dependsOn: ["one"], final: true },
+		],
+	};
+	const deps = baseDeps(mockRunner((t) => `ok:${t}`));
+	const res = await executeTaskflow(mkState(def), deps);
+	// Both phases finished; each must keep both timestamps so wall-clock elapsed
+	// (max endedAt - min startedAt) covers the whole run, not just the last phase.
+	for (const id of ["one", "two"]) {
+		const p = res.state.phases[id];
+		assert.equal(p.status, "done");
+		assert.ok(typeof p.startedAt === "number", `${id} should keep startedAt`);
+		assert.ok(typeof p.endedAt === "number", `${id} should keep endedAt`);
+		assert.ok((p.endedAt as number) >= (p.startedAt as number));
+	}
+});

@@ -366,16 +366,19 @@ export async function executeTaskflow(state: RunState, deps: RuntimeDeps): Promi
 				return;
 			}
 
+			const startedAt = Date.now();
 			state.phases[phase.id] = {
 				...(state.phases[phase.id] ?? { id: phase.id }),
 				id: phase.id,
 				status: "running",
-				startedAt: Date.now(),
+				startedAt,
 			};
 			deps.onProgress?.(state);
 
 			const ps = await executePhase(phase, state, deps, prior, () => deps.onProgress?.(state));
-			state.phases[phase.id] = ps;
+			// Preserve the phase start time: executePhase returns a fresh PhaseState
+			// that omits startedAt (cached/resumed results carry their own).
+			state.phases[phase.id] = ps.startedAt ? ps : { ...ps, startedAt };
 			if ((phase.type ?? "agent") === "gate" && ps.gate?.verdict === "block") {
 				gateBlocked = true;
 				gateReason = ps.gate.reason ?? "";
