@@ -289,7 +289,7 @@ export async function runAgentTask(
 		}
 		if (tmpPromptDir) {
 			try {
-				fs.rmdirSync(tmpPromptDir);
+				fs.rmSync(tmpPromptDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}

@@ -9,7 +9,7 @@ import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { formatTokens, type UsageStats } from "./runner.ts";
 import type { PhaseState, RunState } from "./store.ts";
-import type { Phase } from "./schema.ts";
+import { dependenciesOf, type Phase, topoLayers } from "./schema.ts";
 
 // Single-width glyphs (Geometric Shapes / check marks) — keep columns aligned.
 const ICON: Record<PhaseState["status"], { ch: string; color: string }> = {
@@ -223,35 +223,81 @@ function headerLine(state: RunState, theme: Theme): string {
 	return line;
 }
 
-/** The full dense progress block (header + aligned phase rows). */
+/**
+ * Left-gutter rail glyph for a phase at `i` within a parallel group of `size`.
+ * A group is a topological layer with >1 phase (they run concurrently); the
+ * bracket (┌ ├ └) visually fans them out from the preceding layer. Single-phase
+ * layers get a blank gutter so the column stays quiet.
+ */
+function railGlyph(i: number, size: number): string {
+	if (size <= 1) return " ";
+	if (i === 0) return "┌";
+	if (i === size - 1) return "└";
+	return "├";
+}
+
+/** The full dense progress block (header + DAG-ordered phase rows). */
 export function renderProgress(state: RunState, theme: Theme): string {
 	const phases = state.def.phases;
 	const idW = Math.max(...phases.map((p) => p.id.length), 2);
 	const typeW = Math.max(...phases.map((p) => (p.type ?? "agent").length), 4);
+	const defIndex = new Map(phases.map((p, i) => [p.id, i]));
+
+	// Render in topological order: each layer is a set of phases that can run
+	// concurrently; later layers depend on earlier ones. This makes the DAG's
+	// flow legible top-to-bottom without drawing a full graph.
+	const layers = topoLayers(phases);
+	const rendered = new Set<string>();
 
 	let text = headerLine(state, theme);
-	for (const phase of phases) {
+
+	const renderRow = (phase: Phase, rail: string, prevLayerIds: Set<string>) => {
 		const ps = state.phases[phase.id];
 		const status = ps?.status ?? "pending";
 		const id = phase.id.padEnd(idW);
 		const type = (phase.type ?? "agent").padEnd(typeW);
 		const detail = phaseDetail(phase, ps, theme);
+
+		// Annotate only "long" edges — dependencies that skip past the adjacent
+		// layer. Edges into the immediately-preceding layer are implied by position
+		// (and the rail), so showing them would just add noise.
+		const longEdges = dependenciesOf(phase).filter((d) => !prevLayerIds.has(d));
+		const dep = longEdges.length
+			? theme.fg("dim", `  ↳ ${longEdges.join(", ")}`)
+			: "";
+
+		const gutter = rail === " " ? " " : theme.fg("borderMuted", rail);
 		text +=
-			`\n  ${icon(status, theme)} ` +
+			`\n  ${gutter} ${icon(status, theme)} ` +
 			theme.fg(status === "pending" ? "dim" : "text", id) +
 			"  " +
 			theme.fg("dim", type) +
 			"  " +
-			detail;
+			detail +
+			dep;
 
 		// Live activity sub-line (only while running, only if we have a message).
 		if (status === "running" && ps?.liveText) {
-			const indent = " ".repeat(2 + 2 + idW + 2);
+			const indent = " ".repeat(2 + 2 + 2 + idW + 2);
 			const msg = ps.liveText.replace(/\s+/g, " ").trim();
 			const snip = msg.length > 88 ? `${msg.slice(0, 88)}…` : msg;
 			text += `\n${indent}${theme.fg("dim", "› ")}${theme.fg("muted", snip)}`;
 		}
+		rendered.add(phase.id);
+	};
+
+	let prevLayerIds = new Set<string>();
+	for (const layer of layers) {
+		const ordered = [...layer].sort((a, b) => (defIndex.get(a.id) ?? 0) - (defIndex.get(b.id) ?? 0));
+		ordered.forEach((phase, i) => renderRow(phase, railGlyph(i, ordered.length), prevLayerIds));
+		prevLayerIds = new Set(ordered.map((p) => p.id));
 	}
+
+	// Safety net: render any phase a malformed DAG left out of the layering.
+	for (const phase of phases) {
+		if (!rendered.has(phase.id)) renderRow(phase, " ", prevLayerIds);
+	}
+
 	return text;
 }
 

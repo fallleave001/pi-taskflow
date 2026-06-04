@@ -1,0 +1,550 @@
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { test, beforeEach, afterEach } from "node:test";
+import { discoverAgents, readSubagentSettings, type AgentOverride } from "../extensions/agents.ts";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** The env var that controls `getAgentDir()` inside @earendil-works/pi-coding-agent. */
+const AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
+
+/** Create a temp directory rooted in os.tmpdir(). */
+function makeTmpDir(prefix = "agents-test-"): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+/** Write an agent .md file with YAML frontmatter + body (systemPrompt). */
+function writeAgent(
+	dir: string,
+	filename: string,
+	fields: { name?: string; description?: string; model?: string; thinking?: string; tools?: string },
+	body = "",
+): string {
+	fs.mkdirSync(dir, { recursive: true });
+	const lines: string[] = ["---"];
+	for (const [k, v] of Object.entries(fields)) {
+		if (v !== undefined) lines.push(`${k}: ${v}`);
+	}
+	lines.push("---");
+	if (body) lines.push(body);
+	const filePath = path.join(dir, filename);
+	fs.writeFileSync(filePath, lines.join("\n"), "utf-8");
+	return filePath;
+}
+
+// ---------------------------------------------------------------------------
+// Per-test sandbox
+// ---------------------------------------------------------------------------
+
+let savedAgentDir: string | undefined;
+let tmpRoot: string;
+/** Simulated ~/.pi/agent directory */
+let userAgentDir: string;
+/** Simulated project cwd */
+let projectCwd: string;
+
+beforeEach(() => {
+	savedAgentDir = process.env[AGENT_DIR_ENV];
+	tmpRoot = makeTmpDir();
+	userAgentDir = path.join(tmpRoot, "user-agent");
+	projectCwd = path.join(tmpRoot, "project");
+	fs.mkdirSync(userAgentDir, { recursive: true });
+	fs.mkdirSync(projectCwd, { recursive: true });
+	process.env[AGENT_DIR_ENV] = userAgentDir;
+});
+
+afterEach(() => {
+	if (savedAgentDir === undefined) {
+		delete process.env[AGENT_DIR_ENV];
+	} else {
+		process.env[AGENT_DIR_ENV] = savedAgentDir;
+	}
+	fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+// ===========================================================================
+// discoverAgents — basic discovery
+// ===========================================================================
+
+test("discoverAgents: discovers user agents from <agentDir>/agents/", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "finds things" }, "You are scout.");
+
+	const { agents, projectAgentsDir } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "scout");
+	assert.equal(agents[0].description, "finds things");
+	assert.equal(agents[0].systemPrompt, "You are scout.");
+	assert.equal(agents[0].source, "user");
+	assert.equal(projectAgentsDir, null);
+});
+
+test("discoverAgents: discovers project agents from <cwd>/.pi/agents/", () => {
+	const projAgentsDir = path.join(projectCwd, ".pi", "agents");
+	writeAgent(projAgentsDir, "auditor.md", { name: "auditor", description: "audits code" }, "Audit it.");
+
+	const { agents, projectAgentsDir } = discoverAgents(projectCwd, "project");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "auditor");
+	assert.equal(agents[0].source, "project");
+	assert.equal(projectAgentsDir, projAgentsDir);
+});
+
+test("discoverAgents: returns empty agents when no agent dirs exist", () => {
+	const { agents } = discoverAgents(projectCwd, "both");
+	assert.equal(agents.length, 0);
+});
+
+// ===========================================================================
+// discoverAgents — scope filtering
+// ===========================================================================
+
+test("discoverAgents: scope=user ignores project agents", () => {
+	writeAgent(path.join(userAgentDir, "agents"), "u.md", { name: "u", description: "user" });
+	writeAgent(path.join(projectCwd, ".pi", "agents"), "p.md", { name: "p", description: "proj" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "u");
+});
+
+test("discoverAgents: scope=project ignores user agents", () => {
+	writeAgent(path.join(userAgentDir, "agents"), "u.md", { name: "u", description: "user" });
+	writeAgent(path.join(projectCwd, ".pi", "agents"), "p.md", { name: "p", description: "proj" });
+
+	const { agents } = discoverAgents(projectCwd, "project");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "p");
+});
+
+test("discoverAgents: scope=both merges user and project agents", () => {
+	writeAgent(path.join(userAgentDir, "agents"), "u.md", { name: "u", description: "user" });
+	writeAgent(path.join(projectCwd, ".pi", "agents"), "p.md", { name: "p", description: "proj" });
+
+	const { agents } = discoverAgents(projectCwd, "both");
+	assert.equal(agents.length, 2);
+	const names = agents.map((a) => a.name).sort();
+	assert.deepEqual(names, ["p", "u"]);
+});
+
+test("discoverAgents: scope=both — project agent overrides user agent on name collision", () => {
+	writeAgent(path.join(userAgentDir, "agents"), "scout.md", { name: "scout", description: "user scout" }, "user body");
+	writeAgent(path.join(projectCwd, ".pi", "agents"), "scout.md", { name: "scout", description: "proj scout" }, "proj body");
+
+	const { agents } = discoverAgents(projectCwd, "both");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].description, "proj scout");
+	assert.equal(agents[0].systemPrompt, "proj body");
+	assert.equal(agents[0].source, "project");
+});
+
+// ===========================================================================
+// discoverAgents — frontmatter parsing
+// ===========================================================================
+
+test("discoverAgents: skips files missing required name frontmatter", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	// Missing name
+	writeAgent(agentsDir, "no-name.md", { description: "has desc" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 0);
+});
+
+test("discoverAgents: skips files missing required description frontmatter", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	// Missing description
+	writeAgent(agentsDir, "no-desc.md", { name: "nodesc" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 0);
+});
+
+test("discoverAgents: parses tools from comma-separated frontmatter", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "tooled.md", { name: "tooled", description: "has tools", tools: "read, write, bash" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 1);
+	assert.deepEqual(agents[0].tools, ["read", "write", "bash"]);
+});
+
+test("discoverAgents: tools is undefined when no tools frontmatter", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "no-tools.md", { name: "bare", description: "minimal" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents[0].tools, undefined);
+});
+
+test("discoverAgents: parses model and thinking from frontmatter", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "full.md", {
+		name: "full",
+		description: "fully specced",
+		model: "claude-sonnet-4-20250514",
+		thinking: "high",
+	});
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents[0].model, "claude-sonnet-4-20250514");
+	assert.equal(agents[0].thinking, "high");
+});
+
+test("discoverAgents: skips non-.md files", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	fs.mkdirSync(agentsDir, { recursive: true });
+	fs.writeFileSync(path.join(agentsDir, "agent.txt"), "---\nname: txt\ndescription: nope\n---\nbody");
+	fs.writeFileSync(path.join(agentsDir, "agent.json"), '{"name":"json"}');
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 0);
+});
+
+test("discoverAgents: skips directories inside agents dir", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	fs.mkdirSync(path.join(agentsDir, "subdir.md"), { recursive: true }); // dir named like .md
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 0);
+});
+
+test("discoverAgents: handles empty frontmatter body (systemPrompt is empty)", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "empty-body.md", { name: "empty", description: "no body" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents[0].systemPrompt, "");
+});
+
+test("discoverAgents: multiple agents discovered and ordered by directory listing", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "alpha.md", { name: "alpha", description: "first" });
+	writeAgent(agentsDir, "beta.md", { name: "beta", description: "second" });
+	writeAgent(agentsDir, "gamma.md", { name: "gamma", description: "third" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 3);
+	const names = agents.map((a) => a.name);
+	// fs.readdirSync order is alphabetical on most platforms
+	assert.deepEqual(names, ["alpha", "beta", "gamma"]);
+});
+
+// ===========================================================================
+// discoverAgents — overrides
+// ===========================================================================
+
+test("discoverAgents: overrides apply model to matching agent", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "scout", model: "default-model" });
+
+	const overrides: Record<string, AgentOverride> = {
+		scout: { model: "override-model" },
+	};
+	const { agents } = discoverAgents(projectCwd, "user", overrides);
+	assert.equal(agents[0].model, "override-model");
+});
+
+test("discoverAgents: overrides apply thinking to matching agent", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "scout" });
+
+	const overrides: Record<string, AgentOverride> = {
+		scout: { thinking: "high" },
+	};
+	const { agents } = discoverAgents(projectCwd, "user", overrides);
+	assert.equal(agents[0].thinking, "high");
+});
+
+test("discoverAgents: overrides apply tools to matching agent", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "scout", tools: "read" });
+
+	const overrides: Record<string, AgentOverride> = {
+		scout: { tools: ["read", "write", "bash"] },
+	};
+	const { agents } = discoverAgents(projectCwd, "user", overrides);
+	assert.deepEqual(agents[0].tools, ["read", "write", "bash"]);
+});
+
+test("discoverAgents: overrides for non-existent agent are silently ignored", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "scout" });
+
+	const overrides: Record<string, AgentOverride> = {
+		ghost: { model: "phantom-model" },
+	};
+	const { agents } = discoverAgents(projectCwd, "user", overrides);
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "scout");
+	assert.equal(agents[0].model, undefined);
+});
+
+test("discoverAgents: override with undefined model does not change existing model", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "scout", model: "original" });
+
+	const overrides: Record<string, AgentOverride> = {
+		scout: { model: undefined },
+	};
+	const { agents } = discoverAgents(projectCwd, "user", overrides);
+	assert.equal(agents[0].model, "original");
+});
+
+// ===========================================================================
+// discoverAgents — bug: in-place mutation of agent objects (regression gate)
+// ===========================================================================
+
+test("discoverAgents: overrides mutate agent objects in-place (documents known side-effect)", () => {
+	// This test documents the mutation side-effect bug described in the analysis.
+	// If discoverAgents is called twice with different overrides, the second call
+	// re-reads from disk so the mutation doesn't persist — but if a caller retains
+	// a reference to agents[0] from the first call, it IS mutated.
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "scout", model: "original" });
+
+	const result1 = discoverAgents(projectCwd, "user", { scout: { model: "mutated" } });
+	// The returned agent has the overridden model
+	assert.equal(result1.agents[0].model, "mutated");
+
+	// A second call re-reads from disk, so original model is back
+	const result2 = discoverAgents(projectCwd, "user");
+	assert.equal(result2.agents[0].model, "original");
+});
+
+// ===========================================================================
+// discoverAgents — findNearestProjectAgentsDir (tested indirectly)
+// ===========================================================================
+
+test("discoverAgents: finds .pi/agents in parent directory", () => {
+	// Create .pi/agents two levels up
+	const parentDir = path.join(tmpRoot, "workspace");
+	const childDir = path.join(parentDir, "packages", "app");
+	fs.mkdirSync(childDir, { recursive: true });
+	writeAgent(path.join(parentDir, ".pi", "agents"), "deep.md", { name: "deep", description: "found deep" });
+
+	const { agents, projectAgentsDir } = discoverAgents(childDir, "project");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "deep");
+	assert.equal(projectAgentsDir, path.join(parentDir, ".pi", "agents"));
+});
+
+test("discoverAgents: prefers closest .pi/agents when multiple exist", () => {
+	const grandparent = path.join(tmpRoot, "gp");
+	const parent = path.join(grandparent, "parent");
+	const child = path.join(parent, "child");
+	fs.mkdirSync(child, { recursive: true });
+
+	writeAgent(path.join(grandparent, ".pi", "agents"), "gp.md", { name: "gp-agent", description: "from grandparent" });
+	writeAgent(path.join(parent, ".pi", "agents"), "parent.md", { name: "parent-agent", description: "from parent" });
+
+	const { agents, projectAgentsDir } = discoverAgents(child, "project");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "parent-agent");
+	assert.equal(projectAgentsDir, path.join(parent, ".pi", "agents"));
+});
+
+test("discoverAgents: returns null projectAgentsDir when no .pi/agents found", () => {
+	const isolated = path.join(tmpRoot, "isolated");
+	fs.mkdirSync(isolated, { recursive: true });
+
+	const { agents, projectAgentsDir } = discoverAgents(isolated, "project");
+	assert.equal(agents.length, 0);
+	assert.equal(projectAgentsDir, null);
+});
+
+// ===========================================================================
+// discoverAgents — edge cases
+// ===========================================================================
+
+test("discoverAgents: handles unreadable agent file gracefully", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "good.md", { name: "good", description: "readable" });
+	const badPath = path.join(agentsDir, "bad.md");
+	fs.writeFileSync(badPath, "---\nname: bad\ndescription: bad\n---\nbody");
+	fs.chmodSync(badPath, 0o000);
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	// On systems that enforce file permissions (non-root), bad.md is skipped
+	// On root or permissive systems, both may be loaded
+	assert.ok(agents.length >= 1);
+	assert.ok(agents.some((a) => a.name === "good"));
+
+	// Restore permissions for cleanup
+	fs.chmodSync(badPath, 0o644);
+});
+
+test("discoverAgents: agent filePath is absolute and correct", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	const expectedPath = writeAgent(agentsDir, "pathcheck.md", { name: "pathcheck", description: "check" });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents[0].filePath, expectedPath);
+	assert.ok(path.isAbsolute(agents[0].filePath));
+});
+
+test("discoverAgents: tools with extra whitespace are trimmed", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "spaces.md", { name: "spaces", description: "spaced tools", tools: " read , write ,  bash  " });
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.deepEqual(agents[0].tools, ["read", "write", "bash"]);
+});
+
+test("discoverAgents: empty tools string results in undefined tools", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	// Write raw frontmatter with quoted YAML to avoid parse error on bare commas
+	fs.mkdirSync(agentsDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(agentsDir, "empty-tools.md"),
+		'---\nname: empty-tools\ndescription: no real tools\ntools: " , , "\n---\n',
+	);
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents[0].tools, undefined);
+});
+
+// ===========================================================================
+// readSubagentSettings
+// ===========================================================================
+
+test("readSubagentSettings: returns empty object when settings.json missing", () => {
+	const settings = readSubagentSettings();
+	assert.deepEqual(settings, {});
+});
+
+test("readSubagentSettings: parses agentOverrides from settings.json", () => {
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(
+		settingsPath,
+		JSON.stringify({
+			subagents: {
+				agentOverrides: {
+					scout: { model: "claude-sonnet-4-20250514", thinking: "high" },
+				},
+			},
+		}),
+	);
+
+	const settings = readSubagentSettings();
+	assert.deepEqual(settings.agentOverrides, {
+		scout: { model: "claude-sonnet-4-20250514", thinking: "high" },
+	});
+});
+
+test("readSubagentSettings: parses globalThinking from subagents.globalThinking", () => {
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(
+		settingsPath,
+		JSON.stringify({
+			subagents: { globalThinking: "high" },
+		}),
+	);
+
+	const settings = readSubagentSettings();
+	assert.equal(settings.globalThinking, "high");
+});
+
+test("readSubagentSettings: falls back to defaultThinkingLevel when subagents.globalThinking is absent", () => {
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(
+		settingsPath,
+		JSON.stringify({
+			defaultThinkingLevel: "medium",
+			subagents: {},
+		}),
+	);
+
+	const settings = readSubagentSettings();
+	assert.equal(settings.globalThinking, "medium");
+});
+
+test("readSubagentSettings: subagents.globalThinking takes precedence over defaultThinkingLevel", () => {
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(
+		settingsPath,
+		JSON.stringify({
+			defaultThinkingLevel: "low",
+			subagents: { globalThinking: "high" },
+		}),
+	);
+
+	const settings = readSubagentSettings();
+	assert.equal(settings.globalThinking, "high");
+});
+
+test("readSubagentSettings: returns empty object for malformed JSON", () => {
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(settingsPath, "NOT VALID JSON {{{");
+
+	const settings = readSubagentSettings();
+	assert.deepEqual(settings, {});
+});
+
+test("readSubagentSettings: returns empty agentOverrides when subagents key is missing", () => {
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(settingsPath, JSON.stringify({ someOtherKey: true }));
+
+	const settings = readSubagentSettings();
+	assert.equal(settings.agentOverrides, undefined);
+	assert.equal(settings.globalThinking, undefined);
+});
+
+test("readSubagentSettings: returns empty agentOverrides when subagents is null", () => {
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(settingsPath, JSON.stringify({ subagents: null }));
+
+	// subagents is null, so subagents?.agentOverrides is undefined
+	// subagents?.globalThinking is undefined, ?? raw.defaultThinkingLevel
+	const settings = readSubagentSettings();
+	assert.equal(settings.agentOverrides, undefined);
+});
+
+// ===========================================================================
+// Integration: discoverAgents + readSubagentSettings
+// ===========================================================================
+
+test("integration: readSubagentSettings overrides flow into discoverAgents", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	writeAgent(agentsDir, "scout.md", { name: "scout", description: "scout agent", model: "default-model" });
+
+	const settingsPath = path.join(userAgentDir, "settings.json");
+	fs.writeFileSync(
+		settingsPath,
+		JSON.stringify({
+			subagents: {
+				agentOverrides: {
+					scout: { model: "settings-model", thinking: "high" },
+				},
+			},
+		}),
+	);
+
+	const settings = readSubagentSettings();
+	const { agents } = discoverAgents(projectCwd, "user", settings.agentOverrides);
+
+	assert.equal(agents[0].model, "settings-model");
+	assert.equal(agents[0].thinking, "high");
+});
+
+// ===========================================================================
+// discoverAgents — symlink support
+// ===========================================================================
+
+test("discoverAgents: follows symlinked .md files", () => {
+	const agentsDir = path.join(userAgentDir, "agents");
+	const realDir = path.join(tmpRoot, "real-agents");
+	writeAgent(realDir, "linked.md", { name: "linked", description: "via symlink" }, "linked body");
+
+	fs.mkdirSync(agentsDir, { recursive: true });
+	fs.symlinkSync(path.join(realDir, "linked.md"), path.join(agentsDir, "linked.md"));
+
+	const { agents } = discoverAgents(projectCwd, "user");
+	assert.equal(agents.length, 1);
+	assert.equal(agents[0].name, "linked");
+	assert.equal(agents[0].systemPrompt, "linked body");
+});

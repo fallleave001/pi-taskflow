@@ -114,7 +114,7 @@ export function saveFlow(
 	def: Taskflow,
 	scope: "user" | "project" = "project",
 ): { filePath: string } {
-	const dir = scope === "user" ? userFlowsDir() : findProjectFlowsDir(cwd, true)!;
+	const dir = scope === "user" ? userFlowsDir() : (findProjectFlowsDir(cwd, true) ?? path.join(cwd, ".pi", "taskflows"));
 	fs.mkdirSync(dir, { recursive: true });
 	const safe = def.name.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(dir, `${safe}.json`);

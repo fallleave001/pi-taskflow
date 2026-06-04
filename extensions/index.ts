@@ -19,7 +19,7 @@ import { type AgentScope, discoverAgents, readSubagentSettings } from "./agents.
 import { renderRunResult, summarizeRun } from "./render.ts";
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
 import { executeTaskflow, type RuntimeResult } from "./runtime.ts";
-import { finalPhase, type Taskflow, validateTaskflow } from "./schema.ts";
+import { finalPhase, type Taskflow, validateTaskflow, desugar, isShorthand } from "./schema.ts";
 import {
 	getFlow,
 	listFlows,
@@ -41,6 +41,14 @@ interface TaskflowDetails {
 /** pi reads `isError` at runtime to mark tool failures; it is not in the public type. */
 type ToolResult = AgentToolResult<TaskflowDetails> & { isError?: boolean };
 
+const ShorthandStep = Type.Object(
+	{
+		agent: Type.Optional(Type.String({ description: "Agent for this step (defaults to the first available agent)" })),
+		task: Type.String({ description: "Task prompt for this step (supports {previous.output} in chains)" }),
+	},
+	{ additionalProperties: false },
+);
+
 const TaskflowParams = Type.Object({
 	action: StringEnum(["run", "save", "resume", "list"] as const, {
 		description: "What to do: run a flow, save a definition, resume a paused run, or list saved flows",
@@ -51,6 +59,24 @@ const TaskflowParams = Type.Object({
 		Type.Unknown({
 			description:
 				"Inline taskflow definition (JSON object matching the taskflow DSL). Use to run or save a new flow.",
+		}),
+	),
+	// --- Shorthand (non-DAG) modes, like the subagent tool. No DSL required. ---
+	agent: Type.Optional(
+		Type.String({ description: "Shorthand single mode: agent to run with `task` (like subagent single mode)" }),
+	),
+	task: Type.Optional(
+		Type.String({ description: "Shorthand single mode: the task prompt (like subagent single mode)" }),
+	),
+	tasks: Type.Optional(
+		Type.Array(ShorthandStep, {
+			description: "Shorthand parallel mode: run these tasks concurrently and merge results (like subagent parallel)",
+		}),
+	),
+	chain: Type.Optional(
+		Type.Array(ShorthandStep, {
+			description:
+				"Shorthand chain mode: run sequentially; reference the prior step with {previous.output} (like subagent chain)",
 		}),
 	),
 	args: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Invocation arguments for the flow" })),
@@ -175,6 +201,7 @@ export default function (pi: ExtensionAPI) {
 			"Orchestrate a multi-phase workflow of subagents from a declarative definition.",
 			"Phases (agent, parallel, map, gate, reduce) form a DAG; intermediate outputs stay out of your context — only the final phase output is returned.",
 			"Use action=run with an inline `define` (you write the DSL) or a saved `name`.",
+			"For simple non-DAG delegations (like the subagent tool) skip the DSL: pass `task` (+optional `agent`) for one task, `tasks:[{task,agent?}]` to run in parallel, or `chain:[{task,agent?}]` to run sequentially (reference the prior step with {previous.output}).",
 			"Use action=save to persist a definition as a reusable /tf:<name> command. action=resume continues a paused run. action=list shows saved flows.",
 			"DSL: {name, args?, concurrency?, phases:[{id, type, agent, task, dependsOn?, over?(map), as?(map), branches?(parallel), from?(reduce), output?:'json', final?}]}.",
 			"Interpolation: {args.X}, {steps.ID.output}, {steps.ID.json}, {item} (map), {previous.output}.",
@@ -183,7 +210,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Orchestrate many subagents over a whole codebase/many items (declarative DAG with map fan-out)",
 		promptGuidelines: [
 			"Prefer taskflow whenever a request spans a whole project/codebase or many items — e.g. 'explore / 探索 / 审计 / analyze the project', auditing endpoints, reviewing or migrating many files/modules, or cross-checked research. It fans out to many subagents across phases and aggregates the result, keeping intermediate work out of your context.",
-			"Choose taskflow over ad-hoc parallel subagents when the work has multiple phases (discover → work → review → report), needs dynamic fan-out over a discovered list, or should be saved and rerun. Use the plain subagent tool only for a single delegated task.",
+			"Choose taskflow over ad-hoc parallel subagents when the work has multiple phases (discover → work → review → report), needs dynamic fan-out over a discovered list, or should be saved and rerun. For simple single/parallel/chain delegations use the shorthand `task`/`tasks`/`chain` (no DSL) when you want the run tracked, resumable, or saveable; otherwise the plain subagent tool is fine.",
 			"For taskflow map phases, have the upstream phase emit a JSON array and set output:'json'.",
 		],
 
@@ -209,18 +236,39 @@ export default function (pi: ExtensionAPI) {
 				return finalResult(action, result);
 			}
 
-			// resolve the definition (inline define wins, else saved name)
+			// resolve the definition: inline `define` / shorthand (single|parallel|chain), else saved `name`.
 			let def: Taskflow | undefined;
-			if (params.define) {
-				const v = validateTaskflow(params.define);
+
+			// A shorthand spec can come from `define` (no phases) or top-level params.
+			const shorthandSpec: unknown =
+				params.define ??
+				(params.chain
+					? { chain: params.chain, name: params.name }
+					: params.tasks
+						? { tasks: params.tasks, name: params.name }
+						: params.task
+							? { task: params.task, agent: params.agent, name: params.name }
+							: undefined);
+
+			if (shorthandSpec !== undefined) {
+				let candidate: unknown = shorthandSpec;
+				if (isShorthand(candidate)) {
+					try {
+						candidate = desugar(candidate);
+					} catch (e) {
+						return errorResult(action, `Invalid shorthand: ${e instanceof Error ? e.message : String(e)}`);
+					}
+				}
+				const v = validateTaskflow(candidate);
 				if (!v.ok) return errorResult(action, `Invalid taskflow:\n- ${v.errors.join("\n- ")}`);
-				def = params.define as Taskflow;
+				def = candidate as Taskflow;
 			} else if (params.name) {
 				const saved = getFlow(ctx.cwd, params.name);
 				if (!saved) return errorResult(action, `Saved flow not found: ${params.name}`);
 				def = saved.def;
 			}
-			if (!def) return errorResult(action, "Provide 'define' (inline) or 'name' (saved).");
+			if (!def)
+				return errorResult(action, "Provide 'define' (DSL), shorthand 'task'/'tasks'/'chain', or 'name' (saved).");
 
 			// save
 			if (action === "save") {
@@ -256,10 +304,23 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme) {
 			const action = args.action ?? "run";
-			const name = args.name || (args.define as any)?.name || "(inline)";
-			let text = theme.fg("toolTitle", theme.bold("taskflow ")) + theme.fg("accent", `${action} `) + theme.fg("muted", name);
+			let label = args.name || (args.define as { name?: string } | undefined)?.name;
+			let suffix = "";
 			const phases = (args.define as Taskflow | undefined)?.phases;
-			if (phases) text += theme.fg("dim", ` (${phases.length} phases)`);
+			if (phases) suffix = ` (${phases.length} phases)`;
+			else if (args.chain) {
+				label ||= "chain";
+				suffix = ` (${(args.chain as unknown[]).length} steps)`;
+			} else if (args.tasks) {
+				label ||= "parallel";
+				suffix = ` (${(args.tasks as unknown[]).length} tasks)`;
+			} else if (args.task) {
+				label ||= "task";
+			}
+			label ||= "(inline)";
+			let text =
+				theme.fg("toolTitle", theme.bold("taskflow ")) + theme.fg("accent", `${action} `) + theme.fg("muted", label);
+			if (suffix) text += theme.fg("dim", suffix);
 			return new Text(text, 0, 0);
 		},
 

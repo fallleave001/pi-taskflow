@@ -91,6 +91,88 @@ export type Taskflow = Static<typeof TaskflowSchema>;
 export type ArgSpec = Static<typeof ArgSpecSchema>;
 
 // ---------------------------------------------------------------------------
+// Shorthand (non-DAG) specs — subagent-style ergonomics
+// ---------------------------------------------------------------------------
+//
+// For simple delegations you should not have to author a phases DAG. A
+// shorthand spec mirrors the subagent tool's modes and is desugared into a
+// full Taskflow before validation/execution:
+//
+//   { task, agent? }                  → one `agent` phase           (single)
+//   { tasks: [{task, agent?}, ...] }  → one `parallel` phase        (parallel)
+//   { chain: [{task, agent?}, ...] }  → sequential `agent` phases   (chain)
+//
+// Chain steps reference the prior step's output with {previous.output}, exactly
+// like the subagent tool's {previous} placeholder.
+
+export interface ShorthandStep {
+	agent?: string;
+	task: string;
+}
+
+/** True when `def` is a shorthand spec (no `phases`, but a task/tasks/chain field). */
+export function isShorthand(def: unknown): boolean {
+	if (typeof def !== "object" || def === null) return false;
+	const d = def as Record<string, unknown>;
+	if (Array.isArray(d.phases)) return false;
+	return Array.isArray(d.chain) || Array.isArray(d.tasks) || typeof d.task === "string";
+}
+
+function readStep(s: unknown): ShorthandStep {
+	if (typeof s === "string") return { task: s };
+	if (s && typeof s === "object") {
+		const o = s as Record<string, unknown>;
+		return { agent: typeof o.agent === "string" ? o.agent : undefined, task: String(o.task ?? "") };
+	}
+	return { task: "" };
+}
+
+/**
+ * Desugar a shorthand spec into a full Taskflow DAG. Throws if no recognizable
+ * shorthand field is present. Carries through optional name/description/
+ * concurrency/agentScope/args.
+ */
+export function desugar(def: unknown): Taskflow {
+	if (typeof def !== "object" || def === null) throw new Error("Shorthand spec must be an object");
+	const d = def as Record<string, unknown>;
+
+	const meta: Partial<Taskflow> = {};
+	if (typeof d.description === "string") meta.description = d.description;
+	if (typeof d.concurrency === "number") meta.concurrency = d.concurrency;
+	if (d.agentScope === "user" || d.agentScope === "project" || d.agentScope === "both") meta.agentScope = d.agentScope;
+	if (d.args && typeof d.args === "object") meta.args = d.args as Taskflow["args"];
+	const nameOf = (fallback: string) => (typeof d.name === "string" && d.name.trim() ? d.name.trim() : fallback);
+
+	// chain → sequential agent phases
+	if (Array.isArray(d.chain) && d.chain.length > 0) {
+		const steps = d.chain.map(readStep);
+		const phases: Phase[] = steps.map((s, i) => {
+			const phase: Phase = { id: `step${i + 1}`, type: "agent", task: s.task };
+			if (s.agent) phase.agent = s.agent;
+			if (i > 0) phase.dependsOn = [`step${i}`];
+			if (i === steps.length - 1) phase.final = true;
+			return phase;
+		});
+		return { name: nameOf("chain"), ...meta, phases };
+	}
+
+	// tasks → one parallel phase (fan-out + merge), no extra aggregation agent
+	if (Array.isArray(d.tasks) && d.tasks.length > 0) {
+		const branches: ParallelTask[] = d.tasks.map(readStep).map((s) => (s.agent ? { task: s.task, agent: s.agent } : { task: s.task }));
+		return { name: nameOf("parallel"), ...meta, phases: [{ id: "parallel", type: "parallel", branches, final: true }] };
+	}
+
+	// single task → one agent phase
+	if (typeof d.task === "string") {
+		const phase: Phase = { id: "main", type: "agent", task: d.task, final: true };
+		if (typeof d.agent === "string") phase.agent = d.agent;
+		return { name: nameOf("task"), ...meta, phases: [phase] };
+	}
+
+	throw new Error("Shorthand spec needs one of: 'task' (single), 'tasks' (parallel), or 'chain' (sequential)");
+}
+
+// ---------------------------------------------------------------------------
 // Validation (beyond schema: DAG integrity, phase-type requirements)
 // ---------------------------------------------------------------------------
 

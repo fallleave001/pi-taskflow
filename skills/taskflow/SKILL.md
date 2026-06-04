@@ -1,6 +1,6 @@
 ---
 name: taskflow
-description: Orchestrate multi-phase subagent workflows with pi-taskflow. Use whenever a request spans a whole project or many items — deeply exploring / 探索 / auditing / 审计 / analyzing a codebase, reviewing or migrating many files or modules in parallel, cross-checked/adversarial review, codebase-wide research, or any repeatable orchestration you want to save and rerun. Prefer this over ad-hoc parallel subagents when the work has multiple phases or dynamic fan-out over a discovered list. Not for a single delegated task — use the subagent tool for that.
+description: Orchestrate multi-phase subagent workflows with pi-taskflow. Use whenever a request spans a whole project or many items — deeply exploring / 探索 / auditing / 审计 / analyzing a codebase, reviewing or migrating many files or modules in parallel, cross-checked/adversarial review, codebase-wide research, or any repeatable orchestration you want to save and rerun. Prefer this over ad-hoc parallel subagents when the work has multiple phases or dynamic fan-out over a discovered list. Also supports subagent-style shorthand (single / parallel / chain) for simple non-DAG delegations you want tracked, resumable, or saveable.
 ---
 
 # Taskflow
@@ -16,7 +16,36 @@ the final answer — not every step's transcript.
 - You want **cross-checked / adversarial review** before reporting.
 - You want a **repeatable** orchestration saved as a `/tf:<name>` command.
 
-For a single delegated task, use the `subagent` tool instead.
+For a single quick delegation you can use the **shorthand modes** below (no DSL),
+or the plain `subagent` tool. Use the shorthand when you want the run tracked,
+resumable, or saveable as a `/tf` command.
+
+## Shorthand (non-DAG) — like the subagent tool
+
+Skip the DSL entirely for simple delegations. The runtime desugars these into a
+proper flow, so you still get progress, persistence, resume, and `save`.
+
+```jsonc
+// single  — one agent, one task
+{ "task": "Summarize the architecture of src/", "agent": "explorer" }
+
+// parallel — run several tasks at once, outputs merged
+{ "tasks": [
+  { "task": "Audit auth in src/api", "agent": "analyst" },
+  { "task": "Audit input validation in src/api", "agent": "analyst" }
+] }
+
+// chain — run sequentially; reference the prior step with {previous.output}
+{ "chain": [
+  { "task": "List the public API of src/lib", "agent": "scout" },
+  { "task": "Write docs for:\n{previous.output}", "agent": "writer" }
+] }
+```
+
+- `agent` is optional (defaults to the first available agent).
+- Add `name` to label the run (and to `save` it as a `/tf:<name>` command).
+- Precedence if several are given: `chain` > `tasks` > `task`.
+- You can pass these as top-level tool params **or** inside `define`.
 
 ## How to author a taskflow
 

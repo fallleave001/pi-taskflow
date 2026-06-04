@@ -259,12 +259,20 @@ async function executePhase(
 
 /** Resolve a `{steps.x.json}`-style ref directly to its parsed value (bypassing stringify). */
 function directRef(over: string, state: RunState): unknown {
-	const m = over.match(/^\{steps\.([a-zA-Z0-9_]+)\.(output|json)\}$/);
+	const m = over.match(/^\{steps\.([a-zA-Z0-9_]+)\.(output|json)(?:\.([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*))?\}$/);
 	if (!m) return undefined;
 	const step = state.phases[m[1]];
 	if (!step || step.status !== "done") return undefined;
-	if (m[2] === "json") return step.json ?? safeParse(step.output ?? "");
-	return safeParse(step.output ?? "");
+	let value: unknown;
+	if (m[2] === "json") value = step.json ?? safeParse(step.output ?? "");
+	else value = safeParse(step.output ?? "");
+	if (m[3]) {
+		for (const key of m[3].split(".")) {
+			if (value == null || typeof value !== "object") return undefined;
+			value = (value as Record<string, unknown>)[key];
+		}
+	}
+	return value;
 }
 
 function lastCompletedOutput(state: RunState, phase: Phase): string | undefined {
