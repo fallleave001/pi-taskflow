@@ -188,6 +188,85 @@ Review the audit results below. If any endpoint is missing auth, end with
 3. Reference upstream results explicitly with `{steps.ID...}` and set `dependsOn`.
 4. Mark the result-bearing phase with `"final": true` (else the last phase wins).
 
+## Common mistakes (the runtime will warn you, but don't trip them)
+
+The runtime validates your flow at startup and at each phase's interpolation.
+Two patterns account for ~all the broken runs in the wild — avoid them. If you
+want warnings like these to become hard failures, set `"strictInterpolation": true`
+on the flow.
+
+### 1. Referencing `{steps.X}` without `dependsOn: ["X"]`
+
+```jsonc
+// ❌ WRONG — 'fix-issues' will run in parallel with 'code-review-1' and see the
+// literal string "{steps.code-review-1.output}" instead of the review text.
+{
+  "id": "code-review-1", "type": "agent", "task": "review code"
+},
+{
+  "id": "fix-issues", "type": "agent",
+  "task": "fix {steps.code-review-1.output}"   // ← no dependsOn!
+}
+```
+
+The runtime logs a warning at run start (`Phase 'fix-issues': task references
+{steps.code-review-1.*} but 'code-review-1' is not in dependsOn`) and the phase
+itself gets a `warnings` field with a non-fatal `unresolved placeholders` line.
+The TUI shows a `⚠N` badge. **Always declare the chain:**
+
+```jsonc
+// ✅ RIGHT
+{
+  "id": "code-review-1", "type": "agent", "task": "review code"
+},
+{
+  "id": "fix-issues", "type": "agent",
+  "task": "fix {steps.code-review-1.output}",
+  "dependsOn": ["code-review-1"]                // ← declared
+},
+{
+  "id": "code-review-2", "type": "agent",
+  "task": "re-review {steps.fix-issues.output}",
+  "dependsOn": ["fix-issues"]
+}
+```
+
+Tip: write the `task` first (it tells you what each phase needs), then scan for
+`{steps.*}` references and add the matching `dependsOn`. If a phase truly does
+not depend on anything in its task, you can ignore the warning.
+
+### 2. Assuming the runtime knows "this is a chain"
+
+Phase order in the `phases` array is **documentation, not execution order**.
+The DAG comes from `dependsOn`. If you list `code-review-1`, `fix-issues`,
+`code-review-2`, `fix-final` in that order with no `dependsOn`, the runtime
+treats them as four independent phases and runs all of them in **layer 0** in
+parallel. A phase that finishes first may not be the one you expected.
+
+```jsonc
+// ❌ This is not a chain — it's 4 parallel phases, all racing.
+"phases": [
+  { "id": "code-review-1", ... },
+  { "id": "fix-issues",    ... },
+  { "id": "code-review-2", ... },
+  { "id": "fix-final",     ... }
+]
+```
+
+Use the shorthand if you literally just want `a → b → c → d`:
+
+```jsonc
+{ "chain": [
+  { "agent": "reviewer", "task": "review code" },
+  { "agent": "executor", "task": "fix {previous.output}" },
+  { "agent": "reviewer", "task": "re-review" },
+  { "agent": "executor", "task": "apply final fixes" }
+] }
+```
+
+…or write the full DAG with explicit `dependsOn` (so reviewers/fixers can run
+in parallel against multiple review streams when you want that).
+
 ## Configuration
 
 For the full set of knobs — per-phase `model`/`thinking`/`tools`/`cwd`, the
@@ -197,7 +276,7 @@ variables, and storage paths — read `configuration.md` (next to this file).
 
 Quick reference:
 
-- **Flow:** `name`, `description`, `concurrency` (default 8), `budget` (`maxUSD`/`maxTokens`), `agentScope` (user|project|both), `args`.
+- **Flow:** `name`, `description`, `concurrency` (default 8), `budget` (`maxUSD`/`maxTokens`), `agentScope` (user|project|both), `args`, `strictInterpolation`.
 - **Phase:** `model`, `thinking`, `tools` (whitelist), `cwd`, `output:"json"`, `concurrency` (map/parallel fan-out), `when`, `join` (all|any), `retry`, `use`/`with` (flow), `final`.
 - **Precedence (model/thinking/tools):** phase value → `settings.subagents.agentOverrides[agent]` → agent frontmatter → global/default.
 - **Concurrency:** same-layer phases use `flow.concurrency`; a `map`/`parallel` phase uses `phase.concurrency ?? flow.concurrency ?? 8`.

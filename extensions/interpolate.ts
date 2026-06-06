@@ -20,7 +20,7 @@ export interface InterpolationContext {
 	locals?: Record<string, unknown>;
 }
 
-const PLACEHOLDER = /\{([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)\}/g;
+const PLACEHOLDER = /\{([a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*)\}/g;
 
 export interface InterpolationResult {
 	text: string;

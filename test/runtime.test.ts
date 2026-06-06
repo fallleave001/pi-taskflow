@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 import type { AgentConfig } from "../extensions/agents.ts";
 import type { RunResult, RunOptions } from "../extensions/runner.ts";
@@ -339,4 +342,299 @@ test("runtime: completed phases retain startedAt (run elapsed regression)", asyn
 		assert.ok(typeof p.endedAt === "number", `${id} should keep endedAt`);
 		assert.ok((p.endedAt as number) >= (p.startedAt as number));
 	}
+});
+
+test("runtime: pre-reads context files and prepends their content to the task", async () => {
+	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tf-ctx-"));
+	const ctxFile = path.join(tmpDir, "example.ts");
+	await fs.promises.writeFile(ctxFile, "export const X = 1;\n", "utf-8");
+
+	let receivedTask = "";
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			receivedTask = task;
+			return { agent: "a", task, exitCode: 0, output: "done", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "ctx",
+		phases: [{ id: "only", type: "agent", agent: "a", task: "use it", context: [ctxFile], final: true }],
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.match(receivedTask, /## File:.*example\.ts/);
+	assert.match(receivedTask, /export const X = 1;/);
+
+	await fs.promises.rm(tmpDir, { recursive: true });
+});
+
+test("runtime: context supports interpolated refs resolving to file paths", async () => {
+	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tf-ctx2-"));
+	const ctxFile = path.join(tmpDir, "target.ts");
+	await fs.promises.writeFile(ctxFile, "const T = 2;\n", "utf-8");
+
+	let receivedTask = "";
+	let callCount = 0;
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			callCount++;
+			if (callCount === 1) {
+				return { agent: "a", task, exitCode: 0, output: JSON.stringify([ctxFile]), stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+			}
+			receivedTask = task;
+			return { agent: "a", task, exitCode: 0, output: "done", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "ctx-ref",
+		phases: [
+			{ id: "scout", type: "agent", agent: "a", task: "find files" },
+			{ id: "only", type: "agent", agent: "a", task: "use it", context: ["{steps.scout.output}"], dependsOn: ["scout"], final: true },
+		],
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.match(receivedTask, /## File:.*target\.ts/);
+	assert.match(receivedTask, /const T = 2;/);
+
+	await fs.promises.rm(tmpDir, { recursive: true });
+});
+
+test("runtime: context pre-read works for parallel phases", async () => {
+	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tf-ctxp-"));
+	const ctxFile = path.join(tmpDir, "shared.ts");
+	await fs.promises.writeFile(ctxFile, "export const SHARED = 1;\n", "utf-8");
+
+	const received: string[] = [];
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			received.push(task);
+			return { agent: "a", task, exitCode: 0, output: "done", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "ctx-parallel",
+		phases: [{
+			id: "par", type: "parallel",
+			branches: [{ task: "branch A" }, { task: "branch B" }],
+			context: [ctxFile],
+			final: true,
+		}],
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.equal(received.length, 2, "both branches should run");
+	for (const t of received) {
+		assert.match(t, /## File:.*shared\.ts/, "each branch task must include pre-read context");
+	}
+	await fs.promises.rm(tmpDir, { recursive: true });
+});
+
+
+test("runtime: context pre-read works for map phases", async () => {
+	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tf-ctxm-"));
+	const ctxFile = path.join(tmpDir, "common.ts");
+	await fs.promises.writeFile(ctxFile, "export const COMMON = 2;\n", "utf-8");
+
+	const received: string[] = [];
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			received.push(task);
+			return { agent: "a", task, exitCode: 0, output: "done", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "ctx-map",
+		phases: [
+			{
+				id: "m", type: "map", over: "{steps.src.output}", agent: "a",
+				task: "do {item}", context: [ctxFile],
+				dependsOn: ["src"], final: true,
+			},
+		],
+	};
+	const state = mkState(def);
+	state.phases.src = {
+		id: "src", status: "done",
+		output: JSON.stringify(["a", "b"]),
+		json: ["a", "b"],
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0, contextTokens: 0 },
+		endedAt: 1,
+		startedAt: 0,
+	};
+	const res = await executeTaskflow(state, deps);
+	assert.equal(res.ok, true);
+	assert.ok(received.length >= 1, "map should produce at least one task");
+	for (const t of received) {
+		assert.match(t, /## File:.*common\.ts/, "each map task must include pre-read context");
+	}
+	await fs.promises.rm(tmpDir, { recursive: true });
+});
+
+test("runtime: reduce phase interpolates {steps.X.output} from dependencies", async () => {
+	let mergeReceivedTask = "";
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			if (task.includes("merge:")) mergeReceivedTask = task;
+			return { agent: "a", task, exitCode: 0, output: task.startsWith("produce") ? task.replace("produce ", "") : "merged", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "reduce-interp",
+		phases: [
+			{ id: "a", type: "agent", agent: "a", task: "produce A" },
+			{ id: "b", type: "agent", agent: "a", task: "produce B" },
+			{
+				id: "merge", type: "reduce", from: ["a", "b"],
+				agent: "a",
+				task: "merge: A={steps.a.output} B={steps.b.output}",
+				dependsOn: ["a", "b"], final: true,
+			},
+		],
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.match(mergeReceivedTask, /A=A\b/, "should interpolate {steps.a.output}");
+	assert.match(mergeReceivedTask, /B=B\b/, "should interpolate {steps.b.output}");
+	assert.ok(!mergeReceivedTask.includes("{steps.a.output}"), "no literal placeholder should remain");
+});
+
+test("runtime: context warns and skips when entry resolves to a JSON object blob", async () => {
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			return { agent: "a", task, exitCode: 0, output: "done", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "ctx-blob",
+		phases: [
+			{ id: "src", type: "agent", agent: "a", task: "discover" },
+			{
+				id: "only", type: "agent", agent: "a",
+				task: "use it",
+				context: ["{steps.src.output}"],
+				dependsOn: ["src"], final: true,
+			},
+		],
+	};
+	const state = mkState(def);
+	state.phases.src = {
+		id: "src", status: "done",
+		output: JSON.stringify({ files: ["/tmp/x.ts"], summary: "ok" }),
+		usage: emptyUsage(), endedAt: 1, startedAt: 0,
+	};
+	const res = await executeTaskflow(state, deps);
+	assert.equal(res.ok, true);
+	// The task should NOT contain any file content (JSON blob was filtered out).
+	// The old code would have tried fs.statSync on the JSON string.
+});
+
+test("runtime: context resolves {steps.X.json.field} to extract file paths from objects", async () => {
+	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tf-ctx3-"));
+	const ctxFile = path.join(tmpDir, "nested.ts");
+	await fs.promises.writeFile(ctxFile, "export const N = 3;\n", "utf-8");
+
+	let receivedTask = "";
+	let callCount = 0;
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			callCount++;
+			if (callCount === 1) {
+				// src phase: return the object with files key
+				return { agent: "a", task, exitCode: 0, output: JSON.stringify({ files: [ctxFile], summary: "ok" }), stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+			}
+			receivedTask = task;
+			return { agent: "a", task, exitCode: 0, output: "done", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "ctx-json-field",
+		phases: [
+			{ id: "src", type: "agent", agent: "a", task: "discover" },
+			{
+				id: "only", type: "agent", agent: "a",
+				task: "use it",
+				context: ["{steps.src.json.files}"],
+				dependsOn: ["src"], final: true,
+			},
+		],
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.match(receivedTask, /## File:.*nested\.ts/);
+	assert.match(receivedTask, /export const N = 3;/);
+
+	await fs.promises.rm(tmpDir, { recursive: true });
+});
+
+test("runtime: context with flat JSON array resolved from interpolated ref works unchanged", async () => {
+	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tf-ctx4-"));
+	const ctxFile = path.join(tmpDir, "flat.ts");
+	await fs.promises.writeFile(ctxFile, "export const F = 4;\n", "utf-8");
+
+	let receivedTask = "";
+	let callCount = 0;
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			callCount++;
+			if (callCount === 1) {
+				return { agent: "a", task, exitCode: 0, output: JSON.stringify([ctxFile]), stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+			}
+			receivedTask = task;
+			return { agent: "a", task, exitCode: 0, output: "done", stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "ctx-flat",
+		phases: [
+			{ id: "src", type: "agent", agent: "a", task: "discover" },
+			{
+				id: "only", type: "agent", agent: "a",
+				task: "use it",
+				context: ["{steps.src.output}"],
+				dependsOn: ["src"], final: true,
+			},
+		],
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.match(receivedTask, /## File:.*flat\.ts/);
+	assert.match(receivedTask, /export const F = 4;/);
+
+	await fs.promises.rm(tmpDir, { recursive: true });
+});
+
+test("runtime: reduce phase with from+depsOn has ctx steps populated by prior agent phases", async () => {
+	let mergeTask = "";
+	const deps = baseDeps(
+		async (_c, _ag, _n, task: string): Promise<RunResult> => {
+			mergeTask = task;
+			// Return the task as output so we can trace what the agent received
+			return { agent: "a", task, exitCode: 0, output: `I processed: ${task.slice(0, 80)}`, stderr: "", usage: { ...emptyUsage(), turns: 1 }, stopReason: "end" };
+		},
+	);
+	const def: Taskflow = {
+		name: "reduce-from-deps",
+		phases: [
+			{ id: "a", type: "agent", agent: "a", task: "produce A output" },
+			{ id: "b", type: "agent", agent: "a", task: "produce B output" },
+			{
+				id: "merge", type: "reduce", from: ["a", "b"],
+				agent: "a",
+				task: "FROM-A: {steps.a.output} FROM-B: {steps.b.output}",
+				dependsOn: ["a", "b"], final: true,
+			},
+		],
+	};
+	const state = mkState(def);
+	// Do NOT pre-populate. Let the runtime execute all phases naturally.
+	const res = await executeTaskflow(state, deps);
+	assert.equal(res.ok, true);
+	assert.equal(state.phases.a?.status, "done", "phase a done");
+	assert.equal(state.phases.b?.status, "done", "phase b done");
+	assert.equal(state.phases.merge?.status, "done", "phase merge done");
+	// The merge task should have resolved placeholders
+	assert.match(mergeTask, /FROM-A: I processed/, "merge received interpolated task");
+	assert.ok(!mergeTask.includes("{steps.a.output}"), "no literal placeholder");
+	assert.ok(!mergeTask.includes("{steps.b.output}"), "no literal placeholder");
 });

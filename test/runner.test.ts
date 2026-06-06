@@ -4,9 +4,12 @@ import {
 	type EventAccumulator,
 	foldEventLine,
 	isFailed,
+	looksLikeHtmlOrJson,
 	mapWithConcurrencyLimit,
 	newAccumulator,
 	type RunResult,
+	sanitizeErrorMessage,
+	TRANSPORT_ERROR_PLACEHOLDER,
 } from "../extensions/runner.ts";
 import { emptyUsage } from "../extensions/usage.ts";
 
@@ -229,4 +232,57 @@ test("mapWithConcurrencyLimit: async results resolve in correct slots despite va
 		return item * 2;
 	});
 	assert.deepEqual(result, [100, 80, 60, 40, 20]);
+});
+
+// ── sanitizeErrorMessage / looksLikeHtmlOrJson ──────────────────────
+
+test("sanitizeErrorMessage: passes through short, plain messages", () => {
+	assert.equal(sanitizeErrorMessage("Network timeout"), "Network timeout");
+	assert.equal(sanitizeErrorMessage(""), "");
+	assert.equal(sanitizeErrorMessage(undefined), "");
+});
+
+test("sanitizeErrorMessage: truncates oversized messages with a marker", () => {
+	const big = "x".repeat(8000);
+	const out = sanitizeErrorMessage(big);
+	assert.ok(out.length < 600, `should be truncated, got ${out.length}`);
+	assert.match(out, /truncated \d+ chars/);
+});
+
+test("sanitizeErrorMessage: summarizes upstream HTML (Cloudflare challenge) without leaking it", () => {
+	// A realistic Cloudflare challenge page is several KB — pad to ensure the
+	// HTML summarization branch fires.
+	const pad = " ".repeat(800);
+	const cf = `<html><head><title>Just a moment...</title></head><body><div class="message">Unable to load site</div><span>Ray ID: a06c4b0eade32650</span>${pad}</body></html>`;
+	const out = sanitizeErrorMessage(cf);
+	assert.match(out, /non-JSON response/);
+	assert.match(out, /Hint: Just a moment\.\.\./, "page title should be preferred when present");
+	assert.ok(!out.includes("<html>"), "raw HTML tags must not leak through");
+	assert.ok(!out.includes("a06c4b0eade32650"), "Ray ID should not be preserved verbatim");
+});
+
+test("sanitizeErrorMessage: falls back to title when HTML has no other known hints", () => {
+	const page = `<html><head><title>Gateway blocked</title></head><body><div>Request denied</div></body></html>`;
+	const out = sanitizeErrorMessage(page);
+	assert.match(out, /Hint: Gateway blocked/);
+	assert.ok(!out.includes("<title>"));
+});
+
+test("sanitizeErrorMessage: keeps short HTML as-is (false positive guard)", () => {
+	// A short string starting with '<' that's clearly not a page (e.g. an error
+	// code like "<unknown>") should be left alone.
+	const out = sanitizeErrorMessage("<unknown>");
+	assert.equal(out, "<unknown>");
+});
+
+test("looksLikeHtmlOrJson: detects document-like HTML", () => {
+	assert.equal(looksLikeHtmlOrJson("<html><body>x</body></html>"), true);
+	assert.equal(looksLikeHtmlOrJson("<!doctype html><html>"), true);
+	assert.equal(looksLikeHtmlOrJson("<div>oops</div>"), true);
+	assert.equal(looksLikeHtmlOrJson("plain error text"), false);
+	assert.equal(looksLikeHtmlOrJson(""), false);
+});
+
+test("TRANSPORT_ERROR_PLACEHOLDER: stable marker for failed output", () => {
+	assert.equal(TRANSPORT_ERROR_PLACEHOLDER, "(upstream error: subagent failed; see error)");
 });

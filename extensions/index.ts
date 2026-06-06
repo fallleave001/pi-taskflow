@@ -301,19 +301,28 @@ export default function (pi: ExtensionAPI) {
 							);
 					},
 				});
+				const warningText = v.warnings.length ? `\n\nWarnings:\n- ${v.warnings.join("\n- ")}` : "";
 				return {
 					content: [
-						{ type: "text", text: `Saved taskflow '${def.name}' → ${filePath}\nRun it with /tf:${def.name} or action=run.` },
+						{ type: "text", text: `Saved taskflow '${def.name}' → ${filePath}\nRun it with /tf:${def.name} or action=run.${warningText}` },
 					],
 					details: { action, message: filePath } satisfies TaskflowDetails,
 				};
 			}
 
 			// run
-			const v = validateTaskflow(def);
-			if (!v.ok) return errorResult(action, `Invalid taskflow:\n- ${v.errors.join("\n- ")}`);
 			const args = resolveArgs(def, params.args);
+			const v = validateTaskflow(def, { args, cwd: ctx.cwd });
+			if (!v.ok) return errorResult(action, `Invalid taskflow:\n- ${v.errors.join("\n- ")}`);
+			for (const w of v.warnings) {
+				console.warn(`[taskflow:${def.name}] ${w}`);
+			}
 			const result = await runFlow(def, args, ctx, signal, onUpdate as any);
+			// Surface the validation warnings in the tool result so the model
+			// can acknowledge or fix them, and the user sees them in the chat.
+			if (v.warnings.length) {
+				result.finalOutput = `${result.finalOutput}\n\nWarnings:\n- ${v.warnings.join("\n- ")}`;
+			}
 			return finalResult(action, result);
 		},
 

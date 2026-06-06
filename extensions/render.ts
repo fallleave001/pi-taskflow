@@ -7,7 +7,7 @@
 
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import { formatTokens, type UsageStats } from "./usage.ts";
+import { type UsageStats } from "./usage.ts";
 import type { PhaseState, RunState } from "./store.ts";
 import { dependenciesOf, type Phase, topoLayers } from "./schema.ts";
 
@@ -62,23 +62,16 @@ function miniBar(done: number, total: number, theme: Theme, width = 8): string {
 	return theme.fg("accent", "━".repeat(filled)) + theme.fg("dim", "─".repeat(width - filled));
 }
 
-function compactUsage(usage: UsageStats | undefined, theme: Theme): string {
-	if (!usage) return "";
-	const parts: string[] = [];
-	if (usage.turns) parts.push(theme.fg("dim", `${usage.turns}t`));
-	if (usage.input) parts.push(theme.fg("dim", `↑${formatTokens(usage.input)}`));
-	if (usage.output) parts.push(theme.fg("dim", `↓${formatTokens(usage.output)}`));
-	if (usage.cost) parts.push(theme.fg("muted", `$${usage.cost.toFixed(3)}`));
-	return parts.join(" ");
+function agentRole(phase: Phase, ps: PhaseState | undefined, theme: Theme): string {
+	const role = phase.agent ?? phase.type ?? "agent";
+	const model = ps?.model ? shortModel(ps.model) : "";
+	if (!model) return theme.fg("accent", role);
+	return theme.fg("accent", role) + theme.fg("dim", `（${model}）`);
 }
 
-function liveUsageStr(usage: UsageStats | undefined, theme: Theme): string {
-	if (!usage) return "";
-	const parts: string[] = [];
-	if (usage.input) parts.push(theme.fg("dim", `↑${formatTokens(usage.input)}`));
-	if (usage.output) parts.push(theme.fg("dim", `↓${formatTokens(usage.output)}`));
-	if (usage.cost) parts.push(theme.fg("muted", `$${usage.cost.toFixed(3)}`));
-	return parts.join(" ");
+function costStr(usage: UsageStats | undefined, theme: Theme): string {
+	if (!usage?.cost) return "";
+	return theme.fg("muted", `$${usage.cost.toFixed(3)}`);
 }
 
 function aggregateCost(state: RunState): number {
@@ -118,7 +111,7 @@ function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme): st
 	if (ps.status === "skipped") {
 		const reason = (ps.error ?? "upstream failed").replace(/\s+/g, " ");
 		const snip = reason.length > 52 ? `${reason.slice(0, 52)}…` : reason;
-		return theme.fg("muted", `skipped · ${snip}`);
+		return theme.fg("muted", `skipped · ${snip}`) + (ps.warnings?.length ? theme.fg("warning", `  ⚠${ps.warnings.length}`) : "");
 	}
 
 	const isFanout = type === "map" || type === "parallel" || type === "flow";
@@ -131,30 +124,34 @@ function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme): st
 			return (
 				theme.fg("toolOutput", `${done - failed}/${total}`) +
 				theme.fg("error", ` ${failed}✗`) +
-				(snip ? theme.fg("error", `  ${snip}`) : "")
+				(snip ? theme.fg("error", `  ${snip}`) : "") +
+				(ps.warnings?.length ? theme.fg("warning", `  ⚠${ps.warnings.length}`) : "")
 			);
 		}
-		return theme.fg("error", snip);
+		return theme.fg("error", snip) + (ps.warnings?.length ? theme.fg("warning", `  ⚠${ps.warnings.length}`) : "");
 	}
 
 	const t = phaseElapsed(ps);
 	const time = t ? theme.fg("dim", elapsed(t)) : "";
 
 	if (ps.status === "running") {
-		const model = shortModel(ps.model);
-		const tokens = liveUsageStr(ps.usage, theme);
+		const roleLabel = agentRole(phase, ps, theme);
+		const cost = costStr(ps.usage, theme);
 		if (isFanout && ps.subProgress) {
 			const { done, total, running, failed } = ps.subProgress;
 			let s = `${miniBar(done, total, theme)} ${theme.fg("toolOutput", `${done}/${total}`)}`;
 			if (running) s += theme.fg("dim", ` · ${running} run`);
 			if (failed) s += theme.fg("error", ` · ${failed}✗`);
-			if (tokens) s += `  ${tokens}`;
+			s += `  ${roleLabel}`;
+			if (cost) s += `  ${cost}`;
 			if (time) s += `  ${time}`;
+			if (ps.warnings?.length) s += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 			return s;
 		}
-		let s = model ? theme.fg("accent", model) : theme.fg("warning", "running…");
-		if (tokens) s += `  ${tokens}`;
+		let s = roleLabel;
+		if (cost) s += `  ${cost}`;
 		if (time) s += `  ${time}`;
+		if (ps.warnings?.length) s += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 		return s;
 	}
 
@@ -163,20 +160,22 @@ function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme): st
 		const { done = 0, total = 0, failed = 0 } = ps.subProgress ?? {};
 		let s = theme.fg("success", `${total}✓`);
 		if (failed) s = theme.fg("toolOutput", `${done - failed}/${total}`) + theme.fg("error", ` ${failed}✗`);
-		const u = compactUsage(ps.usage, theme);
-		if (u) s += `  ${u}`;
+		const cost = costStr(ps.usage, theme);
+		if (cost) s += `  ${cost}`;
 		if (time) s += `  ${time}`;
+		if (ps.warnings?.length) s += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 		return s;
 	}
 	// single-agent done
-	const model = shortModel(ps.model);
-	const u = compactUsage(ps.usage, theme);
+	const roleLabel = agentRole(phase, ps, theme);
+	const cost = costStr(ps.usage, theme);
 	if (ps.approval) {
 		const d = ps.approval.decision;
 		const color = d === "reject" ? "error" : d === "edit" ? "warning" : "success";
-		let a = theme.fg(color as Parameters<typeof theme.fg>[0], theme.bold(d.toUpperCase()));
+		let a = theme.fg("warning", "⚠") + " " + theme.fg(color as Parameters<typeof theme.fg>[0], theme.bold(d.toUpperCase()));
 		if (ps.approval.auto) a += theme.fg("dim", " auto");
 		if (time) a += `  ${time}`;
+		if (ps.warnings?.length) a += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 		return a;
 	}
 	if (ps.gate) {
@@ -187,16 +186,18 @@ function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme): st
 			const r = ps.gate.reason.replace(/\s+/g, " ");
 			g += theme.fg("dim", ` ${r.length > 44 ? `${r.slice(0, 44)}…` : r}`);
 		}
-		if (model) g += `  ${theme.fg("dim", model)}`;
+		const cost = costStr(ps.usage, theme);
+		if (cost) g += `  ${cost}`;
 		if (time) g += `  ${time}`;
+		if (ps.warnings?.length) g += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 		return g;
 	}
-	let s = "";
-	if (model) s += theme.fg("accent", model);
-	if (u) s += (s ? "  " : "") + u;
+	let s = roleLabel;
+	if (cost) s += `  ${cost}`;
 	if (ps.attempts && ps.attempts > 1) s += theme.fg("warning", `  ↻${ps.attempts - 1}`);
 	if (time) s += `  ${time}`;
-	return s || theme.fg("dim", "done");
+	if (ps.warnings?.length) s += theme.fg("warning", `  ⚠${ps.warnings.length}`);
+	return s;
 }
 
 /** Header line: status glyph + name + compact totals. */

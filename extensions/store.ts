@@ -45,6 +45,12 @@ export interface PhaseState {
 	budgetTruncated?: boolean;
 	/** Human-in-the-loop outcome (approval phases only). */
 	approval?: { decision: "approve" | "reject" | "edit"; note?: string; auto?: boolean };
+	/** Non-fatal diagnostic warnings accumulated during this phase (e.g.
+	 *  unresolved interpolation placeholders, suspicious templates). */
+	warnings?: string[];
+	/** Truncated previews of interpolated strings used to execute this phase,
+	 *  useful when diagnosing why a model saw a literal placeholder. */
+	interpolation?: Array<{ source: string; text: string; missing?: string[] }>;
 }
 
 export interface RunState {
@@ -148,8 +154,48 @@ export function saveRun(state: RunState): void {
 }
 
 export function loadRun(cwd: string, runId: string): RunState | null {
+	const dir = runsDir(cwd);
+
+	// Reject runIds that could be used for path traversal or filesystem abuse.
+	// Legitimate runIds are produced by newRunId() and contain only
+	// [A-Za-z0-9._-]; anything else (empty string, path separators, NUL bytes,
+	// backslashes on POSIX, forward slashes on Windows) is suspicious.
+	if (
+		typeof runId !== "string" ||
+		runId.length === 0 ||
+		runId.includes("/") ||
+		runId.includes("\\") ||
+		runId.includes("\0")
+	) {
+		return null;
+	}
+
+	const filePath = path.resolve(dir, `${runId}.json`);
+	// Reject runIds that would escape the runs directory (e.g. "../etc/passwd").
+	// Compare with a path-separator suffix so legitimate filenames like "..foo"
+	// (a name that just happens to start with two dots) are not false-positives.
+	const rel = path.relative(dir, filePath);
+	if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+
+	// Resolve symlinks on both the runs dir and the file, so the containment
+	// check below is on a consistent physical path. Without normalizing `dir`,
+	// a legitimate run on macOS (where /var → /private/var) would compare a
+	// symlinked dir prefix to a real path and falsely flag traversal. A
+	// malicious file already placed inside the runs dir could otherwise also
+	// point at an arbitrary path on disk and bypass the lexical check above.
+	let realDir: string;
+	let realFilePath: string;
 	try {
-		const raw = fs.readFileSync(path.join(runsDir(cwd), `${runId}.json`), "utf-8");
+		realDir = fs.realpathSync(dir);
+		realFilePath = fs.realpathSync(filePath);
+	} catch {
+		return null;
+	}
+	const realRel = path.relative(realDir, realFilePath);
+	if (realRel === ".." || realRel.startsWith(`..${path.sep}`) || path.isAbsolute(realRel)) return null;
+
+	try {
+		const raw = fs.readFileSync(realFilePath, "utf-8");
 		return JSON.parse(raw) as RunState;
 	} catch {
 		return null;

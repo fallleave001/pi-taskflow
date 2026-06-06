@@ -86,7 +86,6 @@ Keys of each object in `phases[]`. Some only apply to specific `type`s.
 | `cwd` | all | flow cwd | Run this phase's subagent in a different directory. |
 | `concurrency` | map, parallel | flow concurrency | Fan-out cap for this phase only. See §4. |
 | `final` | all | last phase | Exactly one phase may be `final`; its output is returned. |
-| `optional` | all | `false` | ⚠️ Declared in schema but **not yet enforced** — a failed phase still skips downstream. |
 
 ---
 
@@ -270,6 +269,5 @@ Taskflow shares the subagent settings file at `~/.pi/agent/settings.json`:
 These keys validate but the runtime does **not** act on them yet — don't rely on
 them for behavior:
 
-- `phase.optional` — a failed phase still marks downstream phases as skipped.
 - `arg.required` — missing required args are not rejected.
 - `flow.version` — informational only.

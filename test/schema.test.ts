@@ -139,3 +139,163 @@ test("finalPhase: explicit final, else last", () => {
 	const noFinal: Taskflow["phases"] = [{ id: "a", task: "t" }, { id: "b", task: "t" }];
 	assert.equal(finalPhase(noFinal).id, "b");
 });
+
+test("validateTaskflow: warns when {steps.X} is referenced but X is not in dependsOn", () => {
+	// This is the jiuyang-full-pipeline anti-pattern: the task talks about
+	// {steps.code-review-1.output} but the phase has no dependsOn, so it runs
+	// in parallel with code-review-1 and the model sees the literal placeholder.
+	const def = {
+		name: "no-deps",
+		phases: [
+			{ id: "code-review-1", type: "agent", task: "review code" },
+			{ id: "fix-issues", type: "agent", task: "fix {steps.code-review-1.output}" },
+			{ id: "code-review-2", type: "agent", task: "re-review {steps.fix-issues.output}" },
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true, "missing dependsOn is a warning, not an error");
+	assert.equal(r.warnings.length, 2, "two undeclared refs");
+	assert.match(r.warnings[0], /Phase 'fix-issues'.*'code-review-1'.*not in dependsOn/);
+	assert.match(r.warnings[1], /Phase 'code-review-2'.*'fix-issues'.*not in dependsOn/);
+});
+
+test("validateTaskflow: warns about a phase referencing its own output", () => {
+	const def = {
+		name: "self-ref",
+		phases: [{ id: "loop", type: "agent", task: "use {steps.loop.output} again" }],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 1);
+	assert.match(r.warnings[0], /references its own output/);
+});
+
+test("validateTaskflow: no warning when {steps.X} is properly declared in dependsOn", () => {
+	const def = {
+		name: "ok-deps",
+		phases: [
+			{ id: "a", type: "agent", task: "do" },
+			{ id: "b", type: "agent", task: "use {steps.a.output}", dependsOn: ["a"] },
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 0);
+});
+
+test("validateTaskflow: warning also catches refs in map/parallel branches and over", () => {
+	const def = {
+		name: "fanout-ref",
+		phases: [
+			{ id: "list", type: "agent", task: "list" },
+			{
+				id: "work",
+				type: "map",
+				over: "{steps.list.output}",
+				task: "do {item}",
+				// no dependsOn — should warn
+			},
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 1);
+	assert.match(r.warnings[0], /'work'.*'list'/);
+});
+
+test("validateTaskflow: warning also catches refs in when and flow.with", () => {
+	const def = {
+		name: "when-and-flow-with",
+		phases: [
+			{ id: "plan", type: "agent", task: "plan" },
+			{ id: "ship", type: "agent", task: "ship", when: "{steps.plan.output} == ok" },
+			{ id: "sub", type: "flow", use: "child", with: { note: "use {steps.plan.output}" } },
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 2);
+	assert.match(r.warnings[0], /'ship'.*'plan'/);
+	assert.match(r.warnings[1], /'sub'.*'plan'/);
+});
+
+test("validateTaskflow: invocation warnings catch missing args and cwd/codebase mismatch", () => {
+	const def: Taskflow = {
+		name: "invoke",
+		args: { codebase: { required: true } },
+		phases: [
+			{ id: "a", type: "agent", task: "scan {args.codebase} for {args.branch}", final: true },
+		],
+	};
+	const r = validateTaskflow(def, {
+		args: { codebase: "/repo/app" },
+		cwd: "/tmp/other-project",
+	});
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 2);
+	assert.match(r.warnings[0], /\{args\.branch\}.*did not provide 'branch'/);
+	assert.match(r.warnings[1], /cwd '.*other-project'.*args\.codebase '.*repo\/app'/);
+});
+
+test("validateTaskflow: cwd warning also fires when cwd is a parent of codebase", () => {
+	const def: Taskflow = {
+		name: "parent-cwd",
+		phases: [{ id: "a", type: "agent", task: "scan {args.codebase}", final: true }],
+	};
+	const r = validateTaskflow(def, {
+		args: { codebase: "repo/app" },
+		cwd: "/tmp/workspace",
+	});
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 1);
+	assert.match(r.warnings[0], /cwd '.*workspace'.*args\.codebase '.*workspace\/repo\/app'/);
+});
+
+test("validateTaskflow: no cwd warning when cwd is inside codebase", () => {
+	const def: Taskflow = {
+		name: "inside-codebase",
+		phases: [{ id: "a", type: "agent", task: "scan {args.codebase}", final: true }],
+	};
+	const r = validateTaskflow(def, {
+		args: { codebase: "/tmp/workspace/repo/app" },
+		cwd: "/tmp/workspace/repo/app/src",
+	});
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 0);
+});
+
+test("validateTaskflow: strictInterpolation upgrades warnings to errors", () => {
+	const def = {
+		name: "strict",
+		strictInterpolation: true,
+		phases: [
+			{ id: "review", type: "agent", task: "review" },
+			{ id: "fix", type: "agent", task: "fix {steps.review.output}" },
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, false);
+	assert.ok(r.errors.some((e) => /Strict interpolation: Phase 'fix'/.test(e)));
+});
+
+test("validateTaskflow: accepts context field on any phase type", () => {
+	const def: Taskflow = {
+		name: "ctx",
+		phases: [
+			{ id: "a", type: "agent", task: "t1", context: ["src/a.ts"], final: true },
+			{ id: "b", type: "agent", task: "t2", context: ["src/b.ts", "{steps.a.json}"], contextLimit: 500, dependsOn: ["a"] },
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true);
+});
+
+test("validateTaskflow: missing context field is accepted (backward compatible)", () => {
+	const def: Taskflow = {
+		name: "no-ctx",
+		phases: [{ id: "a", type: "agent", task: "t", final: true }],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true);
+	assert.equal(r.warnings.length, 0);
+});

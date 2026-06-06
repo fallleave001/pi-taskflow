@@ -48,12 +48,67 @@ export function isFailed(r: RunResult): boolean {
 	return r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
 }
 
+/** Placeholder written to a failed phase's `output` so downstream interpolation
+ *  can detect "upstream failed" without being polluted by raw HTML/JSON. */
+export const TRANSPORT_ERROR_PLACEHOLDER = "(upstream error: subagent failed; see error)";
+
+/** Hard cap on the errorMessage field stored in PhaseState (≈ 4 KB). */
+export const ERROR_MESSAGE_MAX_LEN = 4096;
+
+/** Cheap HTML/JSON detector so we can summarize upstream garbage. */
+export function looksLikeHtmlOrJson(s: string): boolean {
+	const t = s.trimStart();
+	if (!t) return false;
+	if (t.startsWith("<")) {
+		// HTML/XML/Cloudflare challenge pages
+		return /^<(?:!doctype\s+html|html|head|body|script|svg|div|iframe|span|p)\b/i.test(t);
+	}
+	if (t.startsWith("{")) {
+		// Truncated JSON. A genuine JSON envelope is fine to keep; an unwrapped
+		// {error: "..."} from an SDK is short. We only treat it as "garbage" if
+		// it parses and is huge — but that's caught by the size cap below.
+		return false;
+	}
+	return false;
+}
+
+/**
+ * Truncate and (when obviously HTML) summarize an errorMessage before it is
+ * persisted. Returns the cleaned string. Empty input returns empty.
+ */
+export function sanitizeErrorMessage(raw: string | undefined): string {
+	if (!raw) return "";
+	const cleaned = raw.replace(/\s+/g, " ").trim();
+	if (!cleaned) return "";
+	// Decide the sanitization branch on the RAW length, not the whitespace-
+	// collapsed length — otherwise an HTML page padded with spaces would slip
+	// through the "looks like HTML" branch and be persisted as-is.
+	const rawLen = raw.length;
+	if (rawLen > ERROR_MESSAGE_MAX_LEN) {
+		const head = cleaned.slice(0, 200);
+		const tail = cleaned.slice(-200);
+		return `${head} ... [truncated ${rawLen - 400} chars] ... ${tail}`;
+	}
+	if (looksLikeHtmlOrJson(cleaned)) {
+		// Any document-like HTML (Cloudflare challenge pages, proxy error pages,
+		// gateway error pages) is a strong signal the upstream returned a page
+		// instead of JSON. Summarize it instead of letting HTML pollute the
+		// phase's error and downstream interpolation contexts.
+		const title = cleaned.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim();
+		const stripped = cleaned.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+		const m = stripped.match(/(?:Unable to load site|Ray ID[: ]+([A-Za-z0-9]+)|[A-Z][a-z]+Error[: ]+(.{0,200}))/i);
+		const hint = title || (m ? (m[1] || m[0]).trim() : stripped.slice(0, 200));
+		return `Upstream returned non-JSON response (${rawLen} chars). Hint: ${hint}`;
+	}
+	return cleaned;
+}
+
 function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
 			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
+				if (part.type === "text" && part.text.trim()) return part.text;
 			}
 		}
 	}
@@ -289,8 +344,17 @@ export async function runAgentTask(
 			result.stopReason = "aborted";
 			result.errorMessage = "Subagent was aborted";
 		}
+		// On failure, build a short, structured errorMessage + a placeholder
+		// output. We deliberately do NOT copy the raw errorMessage into
+		// `output`: upstream providers (e.g. a Cloudflare challenge page) can
+		// surface huge HTML/JSON in errorMessage, and that garbage would
+		// otherwise flow into downstream phase interpolations.
 		if (isFailed(result) && !result.output) {
-			result.output = result.errorMessage || result.stderr || "(no output)";
+			result.output = TRANSPORT_ERROR_PLACEHOLDER;
+			if (!result.errorMessage) {
+				result.errorMessage = result.stderr || `Subagent exited with code ${result.exitCode} (stopReason: ${result.stopReason ?? "unknown"})`;
+			}
+			result.errorMessage = sanitizeErrorMessage(result.errorMessage);
 		}
 		return result;
 	} finally {

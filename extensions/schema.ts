@@ -5,6 +5,7 @@
  * to a subagent (an isolated `pi` process). Phases form a DAG via `dependsOn`.
  */
 
+import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 
@@ -102,6 +103,18 @@ const PhaseSchema = Type.Object(
 			Type.Boolean({ description: "If true, a failure does not abort the run", default: false }),
 		),
 		concurrency: Type.Optional(Type.Number({ description: "Override max concurrency for map/parallel" })),
+		context: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"File paths or {steps.X} refs to pre-read and inject before the task. Resolves interpolated refs first, then reads each file (capped per-file). Eliminates O(N²) turn-cost exploration.",
+			}),
+		),
+		contextLimit: Type.Optional(
+			Type.Number({
+				description: "Max characters to read per file referenced in context (default 8000).",
+				default: 8000,
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -125,6 +138,13 @@ export const TaskflowSchema = Type.Object(
 		budget: Type.Optional(BudgetSchema),
 		agentScope: Type.Optional(
 			StringEnum(["user", "project", "both"] as const, { description: "Agent discovery scope", default: "user" }),
+		),
+		strictInterpolation: Type.Optional(
+			Type.Boolean({
+				description:
+					"When true, unresolved interpolation placeholders and validation warnings about missing deps/args become hard errors",
+				default: false,
+			}),
 		),
 		phases: Type.Array(PhaseSchema, { minItems: 1, description: "Ordered phase definitions (DAG via dependsOn)" }),
 	},
@@ -190,6 +210,8 @@ export function desugar(def: unknown): Taskflow {
 	if (typeof d.concurrency === "number") meta.concurrency = d.concurrency;
 	if (d.agentScope === "user" || d.agentScope === "project" || d.agentScope === "both") meta.agentScope = d.agentScope;
 	if (d.args && typeof d.args === "object") meta.args = d.args as Taskflow["args"];
+	if (d.budget) meta.budget = d.budget;
+	if (typeof d.strictInterpolation === "boolean") meta.strictInterpolation = d.strictInterpolation;
 	const nameOf = (fallback: string) => (typeof d.name === "string" && d.name.trim() ? d.name.trim() : fallback);
 
 	// chain → sequential agent phases
@@ -228,20 +250,35 @@ export function desugar(def: unknown): Taskflow {
 export interface ValidationResult {
 	ok: boolean;
 	errors: string[];
+	/** Non-fatal issues the user should fix; e.g. `{steps.X}` references that
+	 *  aren't declared in `dependsOn` (the phase will run in parallel with its
+	 *  producer and see the literal placeholder). */
+	warnings: string[];
 }
 
-export function validateTaskflow(def: unknown): ValidationResult {
+export interface ValidationOptions {
+	/** Resolved invocation args, used for runtime checks like missing `{args.X}`. */
+	args?: Record<string, unknown>;
+	/** Runtime working directory, used for mismatch warnings (e.g. cwd vs args.codebase). */
+	cwd?: string;
+	/** Override the flow's own `strictInterpolation` flag for this validation call. */
+	strict?: boolean;
+}
+
+export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): ValidationResult {
 	const errors: string[] = [];
+	const warnings: string[] = [];
 
 	if (typeof def !== "object" || def === null) {
-		return { ok: false, errors: ["Taskflow must be an object"] };
+		return { ok: false, errors: ["Taskflow must be an object"], warnings };
 	}
 	const flow = def as Partial<Taskflow>;
+	const strict = opts.strict ?? flow.strictInterpolation === true;
 
 	if (!flow.name || typeof flow.name !== "string") errors.push("Missing or invalid 'name'");
 	if (!Array.isArray(flow.phases) || flow.phases.length === 0) {
 		errors.push("Taskflow must have at least one phase");
-		return { ok: false, errors };
+		return { ok: false, errors, warnings };
 	}
 
 	const ids = new Set<string>();
@@ -318,7 +355,99 @@ export function validateTaskflow(def: unknown): ValidationResult {
 	const finals = (flow.phases as Phase[]).filter((p) => p?.final);
 	if (finals.length > 1) errors.push(`Only one phase may be marked 'final' (found ${finals.length})`);
 
-	return { ok: errors.length === 0, errors };
+	// --- Soft warnings: {steps.X.*} references that aren't declared deps -------
+	// Catches the most common authoring mistake: the task talks about
+	// `{steps.review.output}` but `dependsOn: ["review"]` is missing, so the
+	// phase runs in parallel with `review` and the model sees the literal
+	// placeholder string. The runtime can't infer the intent.
+	if (errors.length === 0) {
+		const idToPhase = new Map((flow.phases as Phase[]).map((p) => [p.id, p]));
+		for (const p of flow.phases as Phase[]) {
+			if (!p?.id) continue;
+			const deps = new Set(dependenciesOf(p));
+			const refs = collectRefs(p);
+			for (const ref of refs.steps) {
+				if (ref === p.id) {
+					warnings.push(`Phase '${p.id}': references its own output via {steps.${ref}.*}; this is almost always a bug.`);
+					continue;
+				}
+				if (!idToPhase.has(ref)) {
+					// Unknown ref is already an error from the dependsOn check, but
+					// {steps.X.*} can appear in a task without dependsOn. Don't
+					// double-warn — the dependsOn loop above already flags it.
+					continue;
+				}
+				if (!deps.has(ref)) {
+					warnings.push(
+						`Phase '${p.id}': task references {steps.${ref}.*} but '${ref}' is not in dependsOn. ` +
+							`The phase will run in parallel with '${ref}' and see the literal placeholder. ` +
+							`Add "dependsOn": ["${ref}"] (or include '${ref}' transitively).`,
+					);
+				}
+			}
+		}
+	}
+
+	// --- Runtime/invocation warnings: missing args + cwd/codebase mismatch -----
+	if (errors.length === 0 && opts.args) {
+		const argRefs = new Set<string>();
+		for (const p of flow.phases as Phase[]) {
+			if (!p?.id) continue;
+			for (const ref of collectRefs(p).args) argRefs.add(ref);
+		}
+		for (const ref of argRefs) {
+			if (!(ref in opts.args)) {
+				warnings.push(
+					`Taskflow references {args.${ref}} but the invocation did not provide '${ref}'. ` +
+						`The placeholder will remain literal unless a default or runtime arg is supplied.`,
+				);
+			}
+		}
+		if (opts.cwd && typeof opts.args.codebase === "string" && opts.args.codebase.trim()) {
+			const cwd = path.resolve(opts.cwd);
+			const codebase = path.resolve(cwd, opts.args.codebase);
+			// Safe case: cwd is the codebase root or a subdirectory within it.
+			// Warn when cwd is a sibling, unrelated path, or a parent of the
+			// codebase (agents that rely on cwd would inspect too broad a tree).
+			if (!pathContains(codebase, cwd)) {
+				warnings.push(
+					`Invocation cwd '${cwd}' does not match args.codebase '${codebase}'. ` +
+						`Some agents may inspect the wrong repo if they rely on cwd. Prefer running from the codebase root or set phase.cwd explicitly.`,
+				);
+			}
+		}
+	}
+
+	if (strict && warnings.length) {
+		errors.push(...warnings.map((w) => `Strict interpolation: ${w}`));
+	}
+
+	return { ok: errors.length === 0, errors, warnings };
+}
+
+function collectRefs(phase: Phase): { steps: string[]; args: string[] } {
+	const steps = new Set<string>();
+	const args = new Set<string>();
+	const scan = (s: string | undefined) => {
+		if (!s) return;
+		let m: RegExpExecArray | null;
+		const stepRe = /\{steps\.([a-zA-Z0-9_-]+)/g;
+		while ((m = stepRe.exec(s)) !== null) steps.add(m[1]);
+		const argRe = /\{args\.([a-zA-Z0-9_-]+)/g;
+		while ((m = argRe.exec(s)) !== null) args.add(m[1]);
+	};
+	scan(phase.task);
+	scan(phase.over);
+	scan(phase.when);
+	for (const b of phase.branches ?? []) scan(b.task);
+	for (const v of Object.values(phase.with ?? {})) if (typeof v === "string") scan(v);
+	for (const c of phase.context ?? []) scan(c);
+	return { steps: Array.from(steps), args: Array.from(args) };
+}
+
+function pathContains(parent: string, child: string): boolean {
+	const rel = path.relative(parent, child);
+	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
 /** Returns a cycle path if the DAG has one, else null. */

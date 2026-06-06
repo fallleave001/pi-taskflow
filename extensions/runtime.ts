@@ -10,6 +10,8 @@
  * result are skipped.
  */
 
+import * as path from "node:path";
+import * as fs from "node:fs";
 import type { AgentConfig } from "./agents.ts";
 import { coerceArray, evaluateCondition, interpolate, type InterpolationContext, safeParse } from "./interpolate.ts";
 import { isFailed, type LiveUpdate, mapWithConcurrencyLimit, runAgentTask, type RunResult } from "./runner.ts";
@@ -147,6 +149,9 @@ function mergePhaseState(
 	const ran = results.filter((r) => r.stopReason !== "budget-skipped");
 	const anyFailed = ran.some(isFailed);
 	const usage = aggregateUsage(results.map((r) => r.usage));
+	// B12: surface the model(s) used in the fan-out so consumers can show
+	// which model produced the merged output.
+	const model = ran.find((r) => r.model !== undefined)?.model;
 	// Combine outputs as a labelled list; also expose a JSON array of outputs.
 	const combinedText = ran
 		.map((r, i) => `### [${i + 1}/${ran.length}] ${r.agent}${isFailed(r) ? " (failed)" : ""}\n\n${r.output}`)
@@ -163,6 +168,7 @@ function mergePhaseState(
 		output: combinedText,
 		json: jsonArray,
 		usage,
+		model,
 		attempts: attempts > results.length ? attempts : undefined,
 		budgetTruncated: budgetSkips.length > 0 || undefined,
 		subProgress: { done: ran.length, total: results.length, running: 0, failed: failedCount },
@@ -188,6 +194,89 @@ function liveSink(state: RunState, phaseId: string, emitProgress: () => void): (
 	};
 }
 
+
+/**
+ * Pre-read files listed in a phase's `context` field and return them as
+ * markdown code blocks. Handles:
+ * - literal paths
+ * - interpolation refs (e.g. `{steps.scout.json}` resolving to `["a.ts"]`)
+ * - per-file truncation via `contextLimit`
+ *
+ * The result is a single string that should be prepended to the phase task so
+ * the subagent never needs to spend turns on file exploration.
+ */
+const CONTEXT_MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_TOTAL_CONTEXT_CHARS = 200_000;
+
+async function resolvePhaseContext(
+	phase: Phase,
+	ctx: InterpolationContext,
+): Promise<string> {
+	const entries = phase.context;
+	if (!entries || entries.length === 0) return "";
+	const limit = phase.contextLimit ?? 8000;
+
+	const paths: string[] = [];
+	for (const entry of entries) {
+		const r = interpolate(entry, ctx);
+		if (r.text !== entry) {
+			// Resolved — may be a JSON array from {steps.X.json}
+			const parsed = safeParse(r.text);
+			if (Array.isArray(parsed)) {
+				for (const item of parsed) {
+					if (typeof item === "string" && item.trim()) paths.push(item.trim());
+				}
+			} else if (typeof r.text === "string" && r.text.trim()) {
+				paths.push(r.text.trim());
+			}
+		} else {
+			// Unchanged — literal path
+			paths.push(entry);
+		}
+	}
+
+	const unique = Array.from(new Set(paths));
+
+	// Diagnose JSON blobs masquerading as file paths — common when a context
+	// entry like {steps.discover.output} resolves to {"files":[...]} instead
+	// of a flat path or JSON array. The author should use {steps.discover.json.files}.
+	const jsonBlobs = unique.filter((p) => p.startsWith("{"));
+	for (const blob of jsonBlobs) {
+		console.warn(
+			`[taskflow] Context entry "${blob.slice(0, 80)}…" looks like a JSON object, not a file path. ` +
+				`Use {steps.<id>.json.<field>} to extract a specific field.`,
+		);
+	}
+	const filtered = jsonBlobs.length ? unique.filter((p) => !p.startsWith("{")) : unique;
+
+	const blocks: string[] = [];
+	for (const p of filtered) {
+		try {
+			const abs = path.resolve(p);
+			const stat = fs.statSync(abs);
+			if (!stat.isFile()) continue;
+			if (stat.size > CONTEXT_MAX_FILE_BYTES) continue;
+			const content = fs.readFileSync(abs, "utf-8");
+			const truncated =
+				content.length > limit
+					? content.slice(0, limit) + `\n... [truncated ${content.length - limit} chars]`
+					: content;
+			const ext = path.extname(p).slice(1) || "txt";
+			blocks.push(`## File: ${p}\n\n\`\`\`${ext}\n${truncated}\n\`\`\``);
+		} catch {
+			console.warn(`[taskflow] Skipped unreadable context file: ${p}`);
+		}
+	}
+
+	// Safety cap: truncate total context when too many files are listed.
+	let result = blocks.join("\n\n") + "\n\n";
+	if (result.length > MAX_TOTAL_CONTEXT_CHARS) {
+		result = result.slice(0, MAX_TOTAL_CONTEXT_CHARS) + `\n\n... [truncated ${result.length - MAX_TOTAL_CONTEXT_CHARS} total chars]`;
+	}
+	return result;
+}
+
+
 async function executePhase(
 	phase: Phase,
 	state: RunState,
@@ -199,6 +288,12 @@ async function executePhase(
 	const concurrency = phase.concurrency ?? state.def.concurrency ?? 8;
 	const previousOutput = lastCompletedOutput(state, phase);
 	const run = deps.runTask ?? runAgentTask;
+
+	// Resolve context pre-read files once, before any type branching.
+	// The content is prepended to every task so the subagent never spends
+	// turns on file exploration for files the flow author already knows.
+	const ctx = buildInterpolationContext(state, previousOutput);
+	const preRead = await resolvePhaseContext(phase, ctx);
 
 	const baseRun = (agentName: string, task: string, onLive?: (l: LiveUpdate) => void) =>
 		run(
@@ -228,6 +323,10 @@ async function executePhase(
 			if (deps.signal?.aborted) break;
 			last = await baseRun(agentName, task, onLive);
 			usages.push(last.usage);
+			// B6: aggregate and surface cumulative usage before the retry decision,
+			// so the TUI / budget guard see the in-flight spend on every attempt.
+			const liveRetry = state.phases[phase.id];
+			if (liveRetry) liveRetry.usage = aggregateUsage(usages);
 			if (!isFailed(last)) break;
 			// Stop retrying on abort or once the run is over budget.
 			if (deps.signal?.aborted || overBudget(state).over) break;
@@ -313,24 +412,26 @@ async function executePhase(
 	// interpolated task. gate additionally parses a verdict; reduce simply pulls
 	// its inputs from `from` phases (already exposed via interpolation).
 	if (type === "agent" || type === "gate" || type === "reduce") {
-		const ctx = buildInterpolationContext(state, previousOutput);
 		const { text } = interpolate(phase.task ?? "", ctx);
-		const inputHash = hashInput(phase.id, phase.agent ?? "", text);
+		const fullTask = preRead + text;
+		const inputHash = hashInput(phase.id, phase.agent ?? "", fullTask);
 		const cached = cachedPhase(prior, inputHash);
 		if (cached) return cached;
 
-		const r = await runOne(phase.agent ?? defaultAgent(deps), text, liveSink(state, phase.id, emitProgress));
+		const r = await runOne(phase.agent ?? defaultAgent(deps), fullTask, liveSink(state, phase.id, emitProgress));
 		const ps = resultToPhaseState(phase.id, r, inputHash, parseJson);
 		if (type === "gate" && ps.status === "done") ps.gate = parseGateVerdict(r.output);
 		return ps;
 	}
 
 	if (type === "parallel") {
-		const ctx = buildInterpolationContext(state, previousOutput);
-		const branches = (phase.branches ?? []).map((b) => ({
-			agent: b.agent ?? phase.agent ?? defaultAgent(deps),
-			task: interpolate(b.task, ctx).text,
-		}));
+		const branches = (phase.branches ?? []).map((b) => {
+			const r = interpolate(b.task, ctx);
+			return {
+				agent: b.agent ?? phase.agent ?? defaultAgent(deps),
+				task: preRead + r.text,
+			};
+		});
 		const inputHash = hashInput(phase.id, JSON.stringify(branches));
 		const cached = cachedPhase(prior, inputHash);
 		if (cached) return cached;
@@ -340,7 +441,6 @@ async function executePhase(
 	}
 
 	if (type === "map") {
-		const ctx = buildInterpolationContext(state, previousOutput);
 		const overResolved = interpolate(phase.over ?? "", ctx).text;
 		// `over` may itself be a placeholder that resolved to a JSON string.
 		const arr = coerceArray(safeParse(overResolved)) ?? coerceArray(directRef(phase.over ?? "", state));
@@ -359,7 +459,7 @@ async function executePhase(
 			const localCtx = buildInterpolationContext(state, previousOutput, { [loopVar]: item });
 			return {
 				agent: phase.agent ?? defaultAgent(deps),
-				task: interpolate(phase.task ?? "", localCtx).text,
+				task: preRead + interpolate(phase.task ?? "", localCtx).text,
 			};
 		});
 		const inputHash = hashInput(phase.id, JSON.stringify(tasks));
@@ -424,7 +524,7 @@ async function executePhase(
 			provided[k] = typeof v === "string" ? interpolate(v, ctx).text : v;
 		}
 		const subArgs = resolveArgs(subDef, provided);
-		const inputHash = hashInput(phase.id, `flow:${name}`, JSON.stringify(subArgs));
+		const inputHash = hashInput(phase.id, `flow:${name}`, preRead, JSON.stringify(subArgs));
 		const cached = cachedPhase(prior, inputHash);
 		if (cached) return cached;
 
@@ -442,10 +542,16 @@ async function executePhase(
 			phases: {},
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
-			cwd: deps.cwd,
+			cwd: phase.cwd ?? deps.cwd,
 		};
+		// B8: pass this flow phase's preRead content to every sub-flow phase by
+		// wrapping runTask — sub-phase preRead still gets prepended on top of it.
+		const baseRunTask = deps.runTask ?? runAgentTask;
+		const subRunTask: typeof runAgentTask = (cwd, agents, agentName, subTask, opts, globalThinking) =>
+			baseRunTask(cwd, agents, agentName, preRead + subTask, opts, globalThinking);
 		const subResult = await executeTaskflow(subState, {
 			...deps,
+			runTask: subRunTask,
 			_stack: [...stack, state.flowName],
 			persist: undefined,
 			onProgress: () => {
@@ -494,7 +600,7 @@ async function executePhase(
 
 /** Resolve a `{steps.x.json}`-style ref directly to its parsed value (bypassing stringify). */
 function directRef(over: string, state: RunState): unknown {
-	const m = over.match(/^\{steps\.([a-zA-Z0-9_]+)\.(output|json)(?:\.([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*))?\}$/);
+	const m = over.match(/^\{steps\.([a-zA-Z0-9_-]+)\.(output|json)(?:\.([a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*))?\}$/);
 	if (!m) return undefined;
 	const step = state.phases[m[1]];
 	if (!step || step.status !== "done") return undefined;

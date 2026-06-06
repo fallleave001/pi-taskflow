@@ -26,6 +26,32 @@ function done(id: string): PhaseState {
 	return { id, status: "done", usage: emptyUsage(), startedAt: 0, endedAt: 1 };
 }
 
+test("renderProgress: surfaces a ⚠ badge when a phase carries warnings", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, {
+		p: { id: "p", status: "done", usage: emptyUsage(), startedAt: 0, endedAt: 1, warnings: ["unresolved {steps.ghost}"] },
+	});
+	const out = renderProgress(state, theme as any);
+	assert.match(out, /⚠1/, "warnings badge should appear in rendered output");
+});
+
+test("renderProgress: skipped + warnings shows both the reason and the badge", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, {
+		p: {
+			id: "p",
+			status: "skipped",
+			error: "Upstream dependency not satisfied",
+			endedAt: 1,
+			usage: emptyUsage(),
+			warnings: ["x"],
+		},
+	});
+	const out = renderProgress(state, theme as any);
+	assert.match(out, /skipped/);
+	assert.match(out, /⚠1/);
+});
+
 // A fan-out → fan-in DAG with a long (layer-skipping) edge:
 //   discover ─┬─ writeA ─┐
 //             ├─ writeB ─┼─ verify ─┐
