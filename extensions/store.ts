@@ -121,11 +121,20 @@ let lastCleanupAt = 0;
 // ---------------------------------------------------------------------------
 
 /**
- * Sanitise a flow name into a safe directory name.  Same regex used by
- * saveFlow/newRunId.  Also rejects path-traversal components.
+ * Sanitise a flow name into a safe directory name. Same regex used by
+ * saveFlow/newRunId — but that regex keeps `.` in its allow-list, so a
+ * flowName of "." or ".." would pass through unchanged and let `flowRunDir`
+ * resolve OUTSIDE the runs root (write-side path traversal). `def.name` is
+ * internally derived and TypeBox only enforces Type.String() with no charset,
+ * so a Taskflow literally named ".." is schema-valid. We therefore reject
+ * bare-dot / leading-dot components after the character substitution so the
+ * write path can never escape runs/ (risk-reviewer v0.0.9 audit, H1).
  */
 function safeFlowDirName(flowName: string): string {
-	return flowName.replace(/[^\w.-]+/g, "_");
+	let safe = flowName.replace(/[^\w.-]+/g, "_");
+	// Collapse leading dots: blocks ".", "..", and hidden-dir names like ".git".
+	safe = safe.replace(/^\.+/, "_");
+	return safe || "_";
 }
 
 /** Return the per-flow run directory: runs/<sanitisedFlowName>. */
@@ -141,6 +150,11 @@ function runFilePath(runsRoot: string, flowName: string, runId: string): string 
 /** Return the path to the run index file. */
 function indexPath(runsRoot: string): string {
 	return path.join(runsRoot, "index.json");
+}
+
+/** Return the lock-file path guarding all index.json read-modify-write cycles. */
+function indexLockPath(runsRoot: string): string {
+	return path.join(runsRoot, "index.json.lock");
 }
 
 /** Return the lock-file path for a given runId (placed next to the run file). */
@@ -170,7 +184,13 @@ function validateRunId(runId: string): boolean {
  * Acquire a file lock by atomically creating a lock file.
  *
  * Uses O_CREAT|O_EXCL (`wx` flag) which is atomic on POSIX and NTFS.
- * Stale locks (> LOCK_STALE_MS) are stolen after best-effort unlink.
+ * Stale locks (> LOCK_STALE_MS) are stolen via an atomic rename rather than a
+ * naive unlink-then-create: a plain `unlinkSync` + `openSync('wx')` has a
+ * TOCTOU window where two processes both unlink the same stale lock and both
+ * then create a fresh one, yielding two simultaneous holders (risk-reviewer
+ * v0.0.9 audit, L1). `rename` is atomic and removes the *specific* inode the
+ * caller observed: only one racing process can win the rename of that exact
+ * stale file, so at most one process proceeds to re-create the lock.
  * Throws on timeout.
  */
 function acquireLock(lockPath: string, timeoutMs: number = LOCK_TIMEOUT_MS): void {
@@ -191,8 +211,17 @@ function acquireLock(lockPath: string, timeoutMs: number = LOCK_TIMEOUT_MS): voi
 			try {
 				const stat = fs.statSync(lockPath);
 				if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
-					// Stale lock — attempt to steal it.
-					try { fs.unlinkSync(lockPath); } catch { /* retry */ }
+					// Stale lock — steal it via atomic rename so only one racing
+					// stealer can win (L1). The "graveyard" name is unique per
+					// process+attempt; the winner unlinks it, losers see ENOENT
+					// on their own rename and simply retry the acquire loop.
+					const grave = `${lockPath}.stale.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
+					try {
+						fs.renameSync(lockPath, grave);
+						// We won the steal — discard the graveyard copy and retry
+						// the loop, where openSync('wx') will create a fresh lock.
+						try { fs.unlinkSync(grave); } catch { /* ignore */ }
+					} catch { /* lost the steal race (ENOENT) — just retry */ }
 					continue;
 				}
 			} catch {
@@ -268,15 +297,26 @@ function writeIndex(runsRoot: string, entries: RunIndexEntry[]): void {
 }
 
 /** Upsert a single entry by runId (read → mutate → write). */
+/**
+ * Upsert a single entry by runId (read → mutate → write).
+ *
+ * Guarded by a dedicated index lock so concurrent saveRun calls for *different*
+ * runIds (each holding only its own per-run lock) cannot interleave their
+ * read-modify-write of the shared index and lose each other's entries
+ * (risk-reviewer v0.0.9 audit, M1). The per-run lock protects the run file;
+ * this index lock protects the shared index.
+ */
 function updateIndexEntry(runsRoot: string, entry: RunIndexEntry): void {
-	const entries = readIndex(runsRoot);
-	const idx = entries.findIndex((e) => e.runId === entry.runId);
-	if (idx >= 0) {
-		entries[idx] = entry;
-	} else {
-		entries.push(entry);
-	}
-	writeIndex(runsRoot, entries);
+	withLock(indexLockPath(runsRoot), () => {
+		const entries = readIndex(runsRoot);
+		const idx = entries.findIndex((e) => e.runId === entry.runId);
+		if (idx >= 0) {
+			entries[idx] = entry;
+		} else {
+			entries.push(entry);
+		}
+		writeIndex(runsRoot, entries);
+	});
 }
 
 // Note: removeIndexEntry is available but not currently called; cleanupTerminalRuns
@@ -341,7 +381,9 @@ function rebuildIndex(runsRoot: string): RunIndexEntry[] {
 	}
 
 	const result = Array.from(entries.values());
-	writeIndex(runsRoot, result);
+	// Persist the rebuilt index under the index lock so it does not race a
+	// concurrent updateIndexEntry / cleanup write (M1).
+	withLock(indexLockPath(runsRoot), () => writeIndex(runsRoot, result));
 	return result;
 }
 
@@ -355,6 +397,13 @@ function rebuildIndex(runsRoot: string): RunIndexEntry[] {
  * Called opportunistically at the end of saveRun.  Throttled to at most once
  * per CLEANUP_INTERVAL_MS.  Active runs (running/paused/blocked) are never
  * touched.
+ *
+ * The index read-modify-write is performed under the index lock so it cannot
+ * race a concurrent updateIndexEntry and clobber a freshly-added entry (M1).
+ * We re-read the index *inside* the lock (rather than trusting a snapshot read
+ * before locking) so the rewrite reflects the latest committed state. File and
+ * directory unlinks happen after the lock is released to keep the critical
+ * section short; deleting a file that is no longer in the index is harmless.
  */
 function cleanupTerminalRuns(
 	runsRoot: string,
@@ -365,46 +414,51 @@ function cleanupTerminalRuns(
 	if (now - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
 	lastCleanupAt = now;
 
-	const entries = readIndex(runsRoot);
-	const terminal: RunIndexEntry[] = [];
-	const active: RunIndexEntry[] = [];
-
-	for (const e of entries) {
-		if (e.status === "completed" || e.status === "failed") {
-			terminal.push(e);
-		} else {
-			active.push(e);
-		}
-	}
-
-	// Sort terminal by updatedAt desc (newest first).
-	terminal.sort((a, b) => b.updatedAt - a.updatedAt);
-
-	const toRemove: RunIndexEntry[] = [];
 	const maxAgeMs = maxAgeDays * 86_400_000;
+	let toRemove: RunIndexEntry[] = [];
 
-	for (let i = 0; i < terminal.length; i++) {
-		const e = terminal[i]!;
-		const expiredByAge = now - e.updatedAt > maxAgeMs;
-		const excessByCount = i >= maxKeep;
-		if (expiredByAge || excessByCount) {
-			toRemove.push(e);
+	withLock(indexLockPath(runsRoot), () => {
+		const entries = readIndex(runsRoot);
+		const terminal: RunIndexEntry[] = [];
+		const active: RunIndexEntry[] = [];
+
+		for (const e of entries) {
+			if (e.status === "completed" || e.status === "failed") {
+				terminal.push(e);
+			} else {
+				active.push(e);
+			}
 		}
-	}
+
+		// Sort terminal by updatedAt desc (newest first).
+		terminal.sort((a, b) => b.updatedAt - a.updatedAt);
+
+		for (let i = 0; i < terminal.length; i++) {
+			const e = terminal[i]!;
+			const expiredByAge = now - e.updatedAt > maxAgeMs;
+			const excessByCount = i >= maxKeep;
+			if (expiredByAge || excessByCount) {
+				toRemove.push(e);
+			}
+		}
+
+		if (toRemove.length === 0) return;
+
+		// Commit the pruned index while holding the lock so a concurrent
+		// updateIndexEntry cannot interleave and lose entries.
+		const remaining = terminal.filter((e) => !toRemove.includes(e));
+		writeIndex(runsRoot, [...active, ...remaining]);
+	});
 
 	if (toRemove.length === 0) return;
 
-	// Delete run files and their lock files.
+	// Delete run files + lock files (outside the index lock).
 	for (const e of toRemove) {
 		const filePath = path.join(runsRoot, e.relPath);
 		try { fs.unlinkSync(filePath); } catch { /* already gone */ }
 		// Also remove any orphaned lock file.
 		try { fs.unlinkSync(filePath + ".lock"); } catch { /* ignore */ }
 	}
-
-	// Write updated index (only active + remaining terminal).
-	const remaining = terminal.filter((e) => !toRemove.includes(e));
-	writeIndex(runsRoot, [...active, ...remaining]);
 
 	// Remove empty flow subdirectories.
 	for (const e of toRemove) {

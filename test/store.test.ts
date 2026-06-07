@@ -311,6 +311,35 @@ test("listFlows: finds flows from .pi dir in parent directory", () => {
 // saveRun / loadRun / listRuns
 // ---------------------------------------------------------------------------
 
+test("saveRun: dot/dotdot/leading-dot flowName cannot escape the runs root (H1)", () => {
+	// Regression for risk-reviewer v0.0.9 H1: safeFlowDirName kept `.` in its
+	// allow-list, so a flow literally named ".." resolved its per-flow dir to
+	// the PARENT of runs/, writing the run file outside the intended tree
+	// (silent loss). Every dot-leading name must be folded to a safe in-tree dir.
+	const cwd = makeTmpCwd();
+	try {
+		const runsRoot = path.join(cwd, ".pi", "taskflows", "runs");
+		for (const bad of ["..", ".", ".git", "..."]) {
+			const state = mkRunState(cwd, { runId: `esc-${Buffer.from(bad).toString("hex")}`, flowName: bad });
+			saveRun(state);
+			// The run must round-trip (loadRun must still find it)…
+			const loaded = loadRun(cwd, state.runId);
+			assert.ok(loaded, `run for flowName ${JSON.stringify(bad)} should round-trip`);
+			assert.equal(loaded.flowName, bad);
+		}
+		// …and NOTHING may be written outside runs/ (i.e. directly in taskflows/).
+		const taskflowsDir = path.join(cwd, ".pi", "taskflows");
+		const stray = fs
+			.readdirSync(taskflowsDir)
+			.filter((e) => e.startsWith("esc-") && e.endsWith(".json"));
+		assert.deepEqual(stray, [], "no run file may escape runs/ into taskflows/");
+		// All escaped names must land inside runs/ under a sanitised subdir.
+		assert.ok(fs.existsSync(runsRoot), "runs/ root must exist");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
 test("saveRun + loadRun: roundtrip persistence", () => {
 	const cwd = makeTmpCwd();
 	try {
@@ -1146,11 +1175,11 @@ test("saveRun: flowName path traversal sanitised", () => {
 		const state = mkRunState(cwd, { flowName: "../../../etc" });
 		saveRun(state);
 
-		// The directory name should have slashes replaced with underscores (dots
-		// are kept by the same regex that saveFlow uses). The resulting name
-		// `.._.._.._etc` is a single safe directory — no actual traversal.
+		// Slashes become underscores AND leading dots are folded to `_` (H1
+		// hardening), so `../../../etc` yields the single safe in-tree dir
+		// `__.._.._etc` — no leading dot, no actual traversal.
 		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
-		const safeDir = path.join(runsDir, ".._.._.._etc");
+		const safeDir = path.join(runsDir, "__.._.._etc");
 		assert.ok(
 			fs.existsSync(safeDir),
 			`traversal flowName should produce safe dir name. Actual dirs: ${fs.readdirSync(runsDir)}`,
@@ -1187,6 +1216,106 @@ test("listRuns: index.json excluded from run listing", () => {
 			assert.notEqual(run.runId, "index.json", "index.json should never appear as a runId");
 		}
 		assert.ok(runs.some((r) => r.runId === "real-run"));
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// v0.0.9 hardening — M1 (index lock) & L1 (stale-steal single winner)
+// ---------------------------------------------------------------------------
+
+test("M1: concurrent saveRun for different runIds keeps every index entry", async () => {
+	// Spawn N child processes that each saveRun a distinct runId at the same
+	// time. Without the index lock, their read-modify-write of the shared
+	// index.json interleaves and entries are lost. With it, all N survive.
+	const cwd = makeTmpCwd();
+	try {
+		const N = 8;
+		const script = `
+			import { saveRun } from ${JSON.stringify(path.resolve("extensions/store.ts"))};
+			const [cwd, runId] = [process.argv[2], process.argv[3]];
+			saveRun({
+				runId, flowName: "concurrent", def: { name: "concurrent", phases: [] },
+				args: {}, status: "completed", phases: {},
+				createdAt: Date.now(), updatedAt: Date.now(), cwd,
+			});
+		`;
+		const scriptPath = path.join(cwd, "child.mjs");
+		fs.writeFileSync(scriptPath, script);
+
+		const { spawn } = await import("node:child_process");
+		const procs = Array.from({ length: N }, (_, i) =>
+			spawn(process.execPath, ["--experimental-strip-types", scriptPath, cwd, `run-${i}`], {
+				stdio: "ignore",
+			}),
+		);
+		const codes = await Promise.all(
+			procs.map((p) => new Promise<number>((res) => p.on("close", (c) => res(c ?? 0)))),
+		);
+		for (const c of codes) assert.equal(c, 0, "each child saveRun should exit 0");
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const entries: RunIndexEntry[] = JSON.parse(
+			fs.readFileSync(path.join(runsDir, "index.json"), "utf-8"),
+		);
+		const ids = new Set(entries.map((e) => e.runId));
+		for (let i = 0; i < N; i++) {
+			assert.ok(ids.has(`run-${i}`), `index must retain run-${i} after concurrent saves`);
+		}
+		// Cross-check: listRuns (which can self-heal) also sees all N.
+		const listed = new Set(listRuns(cwd, 100).map((r) => r.runId));
+		for (let i = 0; i < N; i++) {
+			assert.ok(listed.has(`run-${i}`), `listRuns must see run-${i}`);
+		}
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("L1: a stale lock is stolen cleanly by racing acquirers (no leak, single winner)", async () => {
+	// Two child processes both saveRun the SAME runId while a stale lock is
+	// already present. The atomic-rename steal must let the steal path resolve
+	// without deadlock or double-hold; both must ultimately succeed and the lock
+	// must be released afterwards with no graveyard (.stale.) files left.
+	const cwd = makeTmpCwd();
+	try {
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const flowDir = path.join(runsDir, "lockflow");
+		fs.mkdirSync(flowDir, { recursive: true });
+		const lockPath = path.join(flowDir, "L1.json.lock");
+		// Plant a stale lock (mtime 1h in the past).
+		fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, ts: 0 }));
+		const old = Date.now() / 1000 - 3600;
+		fs.utimesSync(lockPath, old, old);
+
+		const script = `
+			import { saveRun, loadRun } from ${JSON.stringify(path.resolve("extensions/store.ts"))};
+			const cwd = process.argv[2];
+			saveRun({
+				runId: "L1", flowName: "lockflow", def: { name: "lockflow", phases: [] },
+				args: { who: process.pid }, status: "completed", phases: {},
+				createdAt: Date.now(), updatedAt: Date.now(), cwd,
+			});
+			if (!loadRun(cwd, "L1")) process.exit(3);
+		`;
+		const scriptPath = path.join(cwd, "lock-child.mjs");
+		fs.writeFileSync(scriptPath, script);
+
+		const { spawn } = await import("node:child_process");
+		const procs = [0, 1].map(() =>
+			spawn(process.execPath, ["--experimental-strip-types", scriptPath, cwd], { stdio: "ignore" }),
+		);
+		const codes = await Promise.all(
+			procs.map((p) => new Promise<number>((res) => p.on("close", (c) => res(c ?? 0)))),
+		);
+		assert.deepEqual(codes, [0, 0], "both acquirers should succeed");
+
+		const loaded = loadRun(cwd, "L1");
+		assert.ok(loaded, "run should be readable after both saves");
+		assert.ok(!fs.existsSync(lockPath), "lock file must be released, not leaked");
+		const stray = fs.readdirSync(flowDir).filter((f) => f.includes(".stale."));
+		assert.deepEqual(stray, [], "no graveyard (.stale.) files should remain");
 	} finally {
 		cleanup(cwd);
 	}
