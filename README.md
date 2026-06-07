@@ -1,117 +1,133 @@
 <div align="center">
 
-<img src="./assets/hero.png" alt="pi-taskflow — declarative, multi-phase subagent workflows" width="880">
+<img src="./assets/hero.png" alt="pi-taskflow — declarative DAG orchestration for Pi subagents: stateful, resumable, context-isolated" width="900">
 
 <p>
   <a href="https://www.npmjs.com/package/pi-taskflow"><img src="https://img.shields.io/npm/v/pi-taskflow?style=flat-square&color=B692FF&label=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/pi-taskflow"><img src="https://img.shields.io/npm/dm/pi-taskflow?style=flat-square&color=6E8BFF&label=downloads" alt="npm downloads"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-43D9AD?style=flat-square" alt="MIT license"></a>
-  <a href="https://pi.dev"><img src="https://img.shields.io/badge/for-Pi%20coding%20agent-6E8BFF?style=flat-square" alt="for the Pi coding agent"></a>
+  <a href="#whats-inside"><img src="https://img.shields.io/badge/runtime%20deps-0-43D9AD?style=flat-square" alt="zero runtime dependencies"></a>
+  <a href="#whats-inside"><img src="https://img.shields.io/badge/tests-265-6E8BFF?style=flat-square" alt="265 tests"></a>
+  <a href="https://pi.dev"><img src="https://img.shields.io/badge/for-Pi%20coding%20agent-B692FF?style=flat-square" alt="for the Pi coding agent"></a>
 </p>
 
-</div>
-
-> Lightweight workflow orchestration for the [Pi coding agent](https://pi.dev).
-
-**Orchestrate your Pi subagents. Not by prompting — by declaring.**
-
-If you've used the built-in subagent tool's `task` / `tasks` / `chain`, you
-already know the shorthand — your runs just get tracked, resumable, and
-saveable as a one-word `/tf:<name>` command.
+<p><strong>Declarative DAG orchestration for <a href="https://pi.dev">Pi</a> subagents.</strong><br/>
+Fan out · gate · resume · save as a command — intermediate results stay out of your context.</p>
 
 ```bash
 pi install npm:pi-taskflow
 ```
 
-Fan out one subagent per item, route on results, retry the flaky ones, pause for
-human approval, cap the spend, and gate the output with an adversarial review —
-all from one declarative definition. Only the final report reaches your
-conversation; every intermediate transcript stays in the runtime.
+</div>
 
-## Why
+---
 
-The built-in subagent tool is great for a single delegated task. But when a job
-needs many coordinated steps, fan-out over dozens of items, cross-checked review,
-or a repeatable pipeline, you want orchestration — without the intermediate
-transcripts eating your context window.
+**Subagents are fire-and-forget. Taskflows fire, fan out, pause, gate, resume, and save themselves as a command.**
 
-`pi-taskflow` moves the plan into a small declarative definition. The runtime
-holds the DAG, the loops, and the intermediate results; your context receives
-only the final phase's output.
+You already know the built-in subagent tool's `task` / `tasks` / `chain`. `pi-taskflow` speaks the *same* shorthand — so your existing delegations instantly become **tracked, resumable, and saveable as a one-word `/tf:<name>` command**. When you outgrow the shorthand, the full DSL gives you a real DAG: dynamic fan-out over dozens of items, conditional routing, quality gates, human approvals, retries, and a hard spend ceiling.
 
-| | `subagent` tool | `pi-taskflow` |
+And the whole time, **only the final phase reaches your conversation.** Every intermediate transcript stays in the runtime, never your context window.
+
+## Why this exists
+
+Here's the wall you hit with raw subagents: you describe a multi-step plan in prose, the model re-derives it every single run, the intermediate transcripts flood your context, and the moment one model call fails you start over from zero. There's no reuse, no recovery, no structure.
+
+`pi-taskflow` moves the plan **out of the prompt and into a declarative definition.** The runtime owns the DAG, the loops, the retries, and the intermediate state. You declare a pipeline once and run it a hundred times — by name.
+
+> When a job needs twelve steps with branching fan-out and a review gate, you want orchestration — not lucky prompting.
+
+| | subagent (built-in) | **pi-taskflow** |
 |---|---|---|
-| Who drives | the model, turn by turn | the runtime, from a definition |
-| Intermediate results | in your context window | in the runtime (not your context) |
-| Reusable | re-described each time | saved as `/tf:<name>` |
-| Scale | a few tasks | dynamic `map` fan-out |
-| Resumable | no | yes (cross-session, cached phases skip) |
-| Quality gates | no | `gate` phases with `VERDICT: BLOCK / PASS` |
-| Conditional routing | no | `when` guards + `join: any` OR-joins |
-| Fault tolerance | no | per-phase `retry` with backoff |
-| Human-in-the-loop | no | `approval` phases (approve / reject / edit) |
-| Cost control | no | run-wide `budget` (USD / token caps) |
-| Composition | no | `flow` phases run saved sub-flows |
-| Progress visibility | opaque while running | live DAG render with timing + cost |
-| Ergonomics | inline JSON each time | shorthand (`task`/`tasks`/`chain`) or DSL |
+| **Who drives** | the model, turn by turn | the runtime, from a definition |
+| **Topology** | chain / flat parallel | **DAG with layered concurrency + routing** |
+| **Intermediate results** | in your context window | **in the runtime — not your context** |
+| **Scale** | a handful of tasks | **dynamic `map` fan-out over dozens of items** |
+| **Reusable** | re-described every time | **saved as `/tf:<name>`** |
+| **Resumable** | ✗ | **✓ cross-session — cached phases auto-skip** |
+| **Quality gates** | ✗ | **`gate` phases that halt on `VERDICT: BLOCK`** |
+| **Conditional routing** | ✗ | **`when` guards + `join: any` OR-joins** |
+| **Fault tolerance** | ✗ | **per-phase `retry` + auto-retry on transient errors** |
+| **Human-in-the-loop** | ✗ | **`approval` phases (approve / reject / edit)** |
+| **Cost control** | ✗ | **run-wide `budget` (USD / token caps)** |
+| **Composition** | ✗ | **`flow` phases run saved sub-flows** |
+| **Live progress** | opaque while running | **live DAG render with timing + cost** |
+| **Ergonomics** | inline JSON each time | **shorthand (`task`/`tasks`/`chain`) *or* DSL** |
 
-## Show me
+It doesn't replace the subagent tool. It gives your subagents a DAG, a memory, and a name.
 
-Describe a pipeline once, then run it from a pi session by name:
+## 30-second start
 
-> `/tf:summarize-files dir=src`
+**1. Install** — one command:
 
-The runtime fans out one subagent per file, merges the summaries in a `reduce`
-phase, and returns only the final overview. Every intermediate transcript stays
-in the runtime — never in your context window. (Full definition in
-[Quickstart](#then-go-declarative) below.)
-
-## Quickstart
-
-### Shorthand: same effort as `subagent`, but tracked & resumable
-
-**Single task** — one agent, one job:
-
-```jsonc
-{ "task": "Summarize the architecture of src/", "agent": "explorer" }
+```bash
+pi install npm:pi-taskflow
 ```
 
-**Parallel tasks** — fire several at once, outputs merge:
+**2. Run** — just ask the model in a Pi session:
+
+> *Run a chain: first explore the auth flow, then summarize the findings.*
+
+The model calls the `taskflow` tool automatically. You get live progress, per-step timing, token cost, and a saved run record — **same effort as the built-in tool, now tracked and resumable.**
+
+**3. Save** — say *"save it"* and you have `/tf:<name>` forever.
+
+That's it. You can be running your first workflow before your coffee cools — without writing a single phase definition.
+
+### The shorthand (same shape as the built-in tool)
 
 ```jsonc
+// Single — one agent, one job
+{ "task": "Summarize the architecture of src/", "agent": "explorer" }
+
+// Parallel — fire several at once, outputs merge
 { "tasks": [
-  { "task": "Audit auth in src/api",   "agent": "analyst" },
+  { "task": "Audit auth in src/api",             "agent": "analyst" },
   { "task": "Audit input validation in src/api", "agent": "analyst" }
 ] }
-```
 
-**Chain** — sequential, each step sees the previous one's output:
-
-```jsonc
+// Chain — sequential; each step sees the previous output
 { "chain": [
   { "task": "List the public API of src/lib", "agent": "scout" },
   { "task": "Write docs for:\n{previous.output}", "agent": "writer" }
 ] }
 ```
 
-`agent` is optional (defaults to the first available agent). Add `name` to label
-the run and enable saving it as a reusable command.
+`agent` is optional (defaults to the first discovered agent). Add a `name` to label the run and unlock saving it as a command.
 
-Try it inline — tell the model something like:
+## Watch it run
 
-> Run a chain: first explore the auth flow, then summarize findings.
+This is not a mockup. **This is stdout from a real run** — the `self-improve` flow that writes and verifies its own test suites, caught mid-flight by a quality gate:
 
-The model calls the `taskflow` tool; you get live progress, per-step timing,
-token cost, and a run record. Ask to `save` it and you get `/tf:<name>`.
+```
+⊗ taskflow self-improve  6/7 · blocked · $0.095
+    ✓ discover            agent   deepseek-v4-flash  10t ↑38k ↓6.7k $0.011
+  ┌ ✓ write-runner-tests  agent   claude-sonnet-4-6  10t ↑13 ↓6.6k $0.020
+  ├ ✓ write-store-tests   agent   claude-sonnet-4-6  10t ↑11 ↓10k $0.018
+  ├ ✓ write-agents-tests  agent   claude-sonnet-4-6  10t ↑28 ↓13k $0.030
+  └ ✓ fix-stability       agent   claude-sonnet-4-6  10t ↑13 ↓3.9k $0.012
+    ✓ verify              gate    BLOCK 3 type errors in test files  deepseek-v4-flash
+    ⊘ report              reduce  skipped · Gate blocked  ↳ fix-stability
+```
 
-### Then go declarative
+**The layout *is* the DAG.** No dashboard, no logs to grep — you read the progress bar and you understand the whole pipeline:
 
-When your pipeline outgrows the shorthand — when you need dynamic fan-out,
-intermediate JSON routing, or quality gates — graduate to the full DSL:
+- **Header** — `⊗` = blocked (a gate halted it); `6/7` phases processed; aggregate cost `$0.095`.
+- **Status icons** — `✓` done · `◐` running · `✗` failed · `⊘` skipped · `○` pending.
+- **Rail `┌ ├ └`** — phases in the same DAG layer, running concurrently. The four `write-*`/`fix-stability` tasks fan out from `discover`. A blank gutter = a single-phase layer.
+- **`↳`** — a long, layer-skipping dependency. `report` depends on the adjacent `verify` *and* on `fix-stability` two layers back, so only that skip edge is annotated.
+- **Gate** — `verify` emitted `VERDICT: BLOCK`, so the runtime skipped `report` and ended the run as `blocked`, surfacing the reason inline.
+- **Detail** — per phase: model, token counts (`↑`in `↓`out), cost, timing. Fan-out phases also show sub-task progress (`3/15 2✗ 8▸`).
+
+## Go declarative
+
+The shorthand is your onramp. The DSL is where `pi-taskflow` earns its keep — dynamic fan-out, structured routing, and quality gates.
+
+### Fan out and reduce
 
 ```jsonc
 {
   "name": "summarize-files",
-  "description": "Discover files, summarize each, produce a report",
+  "description": "Discover files, summarize each, produce one report",
   "args": { "dir": { "default": "." } },
   "concurrency": 8,
   "phases": [
@@ -119,34 +135,23 @@ intermediate JSON routing, or quality gates — graduate to the full DSL:
       "task": "List source files under {args.dir} (non-recursive).\nOutput ONLY a JSON array [{\"file\":\"\"}]. No prose.",
       "output": "json" },
     { "id": "summarize", "type": "map",
-      "over": "{steps.discover.json}", "as": "item",
-      "agent": "scout",
+      "over": "{steps.discover.json}", "as": "item", "agent": "scout",
       "task": "Read {item.file} and give a one-sentence summary.",
       "dependsOn": ["discover"] },
-    { "id": "report", "type": "reduce", "from": ["summarize"],
-      "agent": "writer",
+    { "id": "report", "type": "reduce", "from": ["summarize"], "agent": "writer",
       "task": "Combine into a short overview:\n{steps.summarize.output}",
       "dependsOn": ["summarize"], "final": true }
   ]
 }
 ```
 
-What this does:
+1. **`discover`** lists every file and emits a JSON array.
+2. **`summarize`** is a `map` — it fans out one subagent per file, throttled to 8 concurrent, with `{item.file}` bound to each path.
+3. **`report`** is a `reduce` — it merges every summary into one clean overview.
 
-1. **`discover`** — an agent lists every file in the directory and outputs a JSON array.
-2. **`summarize`** — a `map` fans out, spawning one subagent per file in parallel
-   (throttled to 8 concurrent). Each gets `{item.file}` bound to its file path.
-3. **`report`** — a `reduce` merges all summaries into one clean overview.
+The intermediate summaries never enter your context. The runtime owns them; you get the report. **Save it once → `/tf:summarize-files dir=src` forever.**
 
-Intermediate outputs never enter your context. The runtime owns them. You get
-only the final report back.
-
-Save it once → `/tf:summarize-files` forever.
-
-### Route, gate, and guard
-
-Phases also **branch, retry, pause for a human, and respect a budget** — still
-declaratively, no scripting:
+### Route, gate, retry, approve, and cap the spend
 
 ```jsonc
 {
@@ -168,59 +173,28 @@ declaratively, no scripting:
 }
 ```
 
-- **`when`** routes to `deep` *or* `quick` from the triage JSON; the other branch is skipped.
-- **`join: "any"`** lets `approve` run as soon as whichever branch fired completes.
+- **`when`** routes to `deep` *or* `quick` from the triage JSON — the other branch is skipped.
+- **`join: "any"`** lets `approve` fire the moment whichever branch ran completes (an OR-join).
 - **`retry`** re-runs a flaky patch with backoff; **`budget`** halts the whole run if it gets too expensive.
 - **`approval`** pauses for a human (approve / reject / edit) before the final `ship`.
 
-## Watch it run
-
-This is the live progress render for a real run — the `self-improve` flow that
-writes and verifies its own test suites, caught here mid-block by a quality gate:
-
-```
-⊗ taskflow self-improve  6/7 · blocked · $0.095
-    ✓ discover            agent   deepseek-v4-flash  10t ↑38k ↓6.7k $0.011
-  ┌ ✓ write-runner-tests  agent   claude-sonnet-4-6  10t ↑13 ↓6.6k $0.020
-  ├ ✓ write-store-tests   agent   claude-sonnet-4-6  10t ↑11 ↓10k $0.018
-  ├ ✓ write-agents-tests  agent   claude-sonnet-4-6  10t ↑28 ↓13k $0.030
-  └ ✓ fix-stability       agent   claude-sonnet-4-6  10t ↑13 ↓3.9k $0.012
-    ✓ verify              gate    BLOCK 3 type errors in test files  deepseek-v4-flash
-    ⊘ report              reduce  skipped · Gate blocked  ↳ fix-stability
-```
-
-**How to read it — the layout *is* the DAG:**
-
-- **Header** — `⊗` means the flow is blocked (a gate halted it); `6/7` phases
-  processed, aggregate cost `$0.095`.
-- **Status icons** — `✓` done, `◐` running, `✗` failed, `⊘` skipped, `○` pending.
-- **Rail `┌ ├ └`** — phases in the same DAG layer, running concurrently. The four
-  `write-*`/`fix-stability` tasks all fan out from `discover`. A blank gutter is
-  a single-phase layer.
-- **`↳`** — a long (layer-skipping) dependency. `report` depends on `verify` (the
-  adjacent layer, implied by position) *and* `fix-stability` two layers back, so
-  only that skip edge is annotated.
-- **Gate** — `verify` emitted `VERDICT: BLOCK`, so the runtime skipped `report`
-  and ended the run as `blocked`, surfacing the reason.
-- **Detail** — per phase: model, token counts (`↑`in `↓`out), cost, and timing.
-  Fan-out phases also show sub-task progress.
+No scripting. No `eval`. Just data the runtime executes — safe enough to run LLM-generated definitions directly.
 
 ## Phase types
 
-| type | meaning | required fields |
-|------|---------|-----------------|
+| type | what it does | required fields |
+|------|--------------|-----------------|
 | `agent` | one subagent runs a single task | `task` |
 | `parallel` | run `branches[]` concurrently | `branches` (array of `{task, agent?}`) |
-| `map` | fan out over an array — one subagent per item, `{item}` bound | `over`, `task` |
+| `map` | **fan out** over an array — one subagent per item, `{item}` bound | `over`, `task` |
 | `gate` | quality/review step that can **halt the flow** | `task` |
 | `reduce` | aggregate `from[]` phase outputs into one | `from`, `task` |
-| `approval` | **human-in-the-loop** pause — approve / reject / edit before continuing | — |
-| `flow` | run a **saved sub-flow** as one phase (composition/reuse) | `use` |
+| `approval` | **human-in-the-loop** pause — approve / reject / edit | — |
+| `flow` | run a **saved sub-flow** as one phase (composition) | `use` |
 
 ### Common phase fields
 
-Every phase needs a unique `id` and a `type` (defaults to `agent`). On top of the
-per-type fields above:
+Every phase needs a unique `id` and a `type` (defaults to `agent`). On top of the per-type fields:
 
 | Field | Meaning |
 |---|---|
@@ -237,62 +211,35 @@ per-type fields above:
 | `optional` | A failure here does **not** abort the run |
 | `use` / `with` | (`flow`) saved sub-flow name + its args |
 
-Flow-level keys: `name`, `description`, `args`, `concurrency` (default 8),
-`agentScope`, and `budget: { maxUSD?, maxTokens? }`.
+Flow-level keys: `name`, `description`, `args`, `concurrency` (default 8), `agentScope`, and `budget: { maxUSD?, maxTokens? }`.
 
 ### Control flow & reliability
 
-- **`when`** — skip a phase unless an expression is truthy. Supports `{refs}`,
-  `== != < > <= >=`, `&& || !`, parentheses, and quoted strings/numbers, e.g.
-  `"when": "{steps.triage.json.route} == deep"`. Pair with `join: "any"` on the
-  merge phase to build real if/else routing. Parse errors **fail open**.
-- **`join: "any"`** — an OR-join: the phase runs as soon as *one* dependency
-  completes (default `"all"` waits for every dep).
-- **`retry`** — `{ "max": 2, "backoffMs": 500, "factor": 2 }` retries a failing
-  subagent with fixed (`factor:1`) or exponential backoff; usage is summed and
-  the attempt count shows as `↻N` in the TUI.
-- **`approval`** — pause for a human (`select`: Approve / Reject / Edit). Reject
-  halts the flow; Edit injects the typed note as the phase output for downstream
-  steps. Non-interactive runs auto-approve.
-- **`flow`** — `{ "type": "flow", "use": "deep-research", "with": { "topic": "{item}" } }`
-  runs a saved flow as a phase (recursion is detected and rejected).
-- **`budget`** — a run-wide `{maxUSD, maxTokens}` ceiling; once exceeded, pending
-  phases are skipped (and in-flight fan-out stops spawning) and the run is
-  `blocked`.
-
-### `output` format
-
-- `output: "text"` (default) — the raw subagent output.
-- `output: "json"` — the subagent output is parsed as JSON and exposed via
-  `{steps.ID.json}` / `{steps.ID.json.field}`. Set this on phases whose output
-  a downstream `map` or `reduce` needs to consume as structured data.
-
-There is no `output: "file"`. For file-based output, have the agent write to
-disk with a `write` tool call.
+- **`when`** — skip a phase unless an expression is truthy. Supports `{refs}`, `== != < > <= >=`, `&& || !`, parentheses, and quoted strings/numbers. Pair with `join: "any"` on the merge phase for real if/else routing. Parse errors **fail open**.
+- **`join: "any"`** — an OR-join: the phase runs as soon as *one* dependency completes (default `"all"` waits for all).
+- **`retry`** — `{ "max": 2, "backoffMs": 500, "factor": 2 }` retries a failing subagent with fixed or exponential backoff; usage is summed and the attempt count shows as `↻N` in the TUI. Transient provider errors (rate-limit / 5xx / timeout) **auto-retry even without an explicit policy**; hard errors don't.
+- **`approval`** — pause for a human (Approve / Reject / Edit). Reject halts the flow; Edit injects the typed note as the phase output for downstream steps. Non-interactive runs auto-approve.
+- **`flow`** — `{ "type": "flow", "use": "deep-research", "with": { "topic": "{item}" } }` runs a saved flow as a phase (recursion is detected and rejected).
+- **`budget`** — a run-wide `{maxUSD, maxTokens}` ceiling; once exceeded, pending phases skip and in-flight fan-out stops spawning, ending the run as `blocked`.
+- **idle watchdog** — a subagent that goes silent for 5 minutes is treated as wedged and killed (SIGTERM → SIGKILL), so one hung child can never freeze the whole flow.
 
 ### Gate phases (quality control)
 
-A `gate` runs an agent to review upstream output and can **block the rest
-of the workflow**. End the gate task's instructions by asking the agent to
-emit a verdict the runtime can read:
+A `gate` runs an agent to review upstream output and can **block the rest of the workflow.** End the gate task by asking for a verdict the runtime can read:
 
-- a final line `VERDICT: PASS` or `VERDICT: BLOCK` (also accepts `OK`, `FAIL`,
-  `STOP`, `REJECT`, `HALT` — last occurrence wins), or
-- JSON like `{"continue": false, "reason": "missing auth checks"}` /
-  `{"verdict": "block", "reason": "..."}`.
+- a final line `VERDICT: PASS` or `VERDICT: BLOCK` (also accepts `OK`, `FAIL`, `STOP`, `REJECT`, `HALT` — last occurrence wins), or
+- JSON like `{"continue": false, "reason": "missing auth checks"}` / `{"verdict": "block", "reason": "..."}`.
 
-On **BLOCK**, downstream phases are skipped and the run ends as `blocked` with
-the reason surfaced. **Ambiguous output fails open** (treated as PASS) — a gate
-never halts the flow by accident.
+On **BLOCK**, downstream phases skip and the run ends as `blocked` with the reason surfaced. **Ambiguous output fails open** (treated as PASS) — a gate never halts your flow by accident.
 
 ```
-Review the audit results below. If any endpoint is missing auth, end with
+Review the audit below. If any endpoint is missing auth, end with
 "VERDICT: BLOCK" and a one-line reason; otherwise end with "VERDICT: PASS".
 
 {steps.audit.output}
 ```
 
-## Interpolation
+## Interpolation & expressions
 
 | placeholder | resolves to |
 |---|---|
@@ -302,9 +249,13 @@ Review the audit results below. If any endpoint is missing auth, end with
 | `{item}` / `{item.field}` | current item inside a `map` phase |
 | `{previous.output}` | the immediately-upstream phase output |
 
+Condition grammar (for `when`): `== != < > <= >=`, `&& || !`, parentheses, quoted strings/numbers, and any `{...}` reference — e.g. `"when": "{steps.triage.json.route} == deep && {args.force} != true"`.
+
+> Referencing `{steps.X}` that isn't declared in `dependsOn` is a **hard validation error** — the runtime catches the most common pipeline bug before a single agent runs.
+
 ## Commands
 
-Saved flows become CLI shortcuts. All commands work in the pi session:
+Saved flows become CLI shortcuts. All commands run in the Pi session:
 
 | Command | What it does |
 |---|---|
@@ -315,18 +266,19 @@ Saved flows become CLI shortcuts. All commands work in the pi session:
 | `/tf resume <runId>` | Continue a paused/failed run — cached phases skip automatically |
 | `/tf:<name> [args]` | Shortcut — runs the flow in one tap |
 
-Tool actions (used by the model): `run` (inline `define` or saved `name`),
-`save`, `resume`, `list`.
+Tool actions (used by the model): `run` (inline `define` or saved `name`), `save`, `resume`, `list`.
 
 ## Storage
 
 ```
 .pi/taskflows/<name>.json          # project-scoped definitions (commit to share)
 ~/.pi/agent/taskflows/<name>.json  # user-scoped definitions
-.pi/taskflows/runs/<runId>.json    # run state (resume); gitignore this
+.pi/taskflows/runs/<runId>.json    # run state for resume (gitignore this)
 ```
 
-Agent discovery scope (set via `agentScope` in the flow definition):
+> Commit `.pi/taskflows/` and your whole team shares the pipelines — no config sync, no onboarding doc. Run state is written atomically and guarded by a zero-dependency file lock, so concurrent runs never corrupt the index.
+
+Agent discovery scope (via `agentScope` in the flow definition):
 
 | value | discovers agents from |
 |---|---|
@@ -336,20 +288,11 @@ Agent discovery scope (set via `agentScope` in the flow definition):
 
 ## Agents
 
-Taskflow reuses your existing pi agent files (`~/.pi/agent/agents/*.md`,
-`.pi/agents/*.md`). Reference agents by `name` in a phase or shorthand.
-
-When running a phase, the runtime extracts the agent's `systemPrompt` from its
-`.md` frontmatter and passes it via `--append-system-prompt` (written to a temp
-file). Phase-level overrides for `model`, `thinking`, and `tools` are passed as
-`--model` / `--thinking` / `--tools` flags to the subagent invocation.
-
-Settings from `~/.pi/agent/settings.json` (the `subagents.agentOverrides` map)
-are honored, letting you tweak model, thinking, or tools per agent across all flows.
+Taskflow reuses your existing Pi agent files (`~/.pi/agent/agents/*.md`, `.pi/agents/*.md`) — reference them by `name` in any phase or shorthand. The runtime extracts each agent's `systemPrompt` from its `.md` frontmatter and passes it via `--append-system-prompt`; phase-level `model` / `thinking` / `tools` overrides map to the matching subagent flags. Settings from `~/.pi/agent/settings.json` (`subagents.agentOverrides`) are honored across all flows.
 
 ## Examples
 
-Ready-to-read definitions live in [`examples/`](./examples):
+Ready-to-read definitions in [`examples/`](./examples):
 
 | File | Demonstrates |
 |---|---|
@@ -357,37 +300,33 @@ Ready-to-read definitions live in [`examples/`](./examples):
 | [`conditional-research.json`](./examples/conditional-research.json) | `when` routing + `join: any` + `gate` + `budget` |
 | [`guarded-refactor.json`](./examples/guarded-refactor.json) | `approval` (human-in-the-loop) + `retry` + `gate` |
 
-To use one, copy it into `.pi/taskflows/<name>.json` (or
-`~/.pi/agent/taskflows/`) and it registers as `/tf:<name>` — or just point the
-model at the definition.
+Copy one into `.pi/taskflows/<name>.json` (or `~/.pi/agent/taskflows/`) and it registers as `/tf:<name>` — or just point the model at it.
+
+## What's inside
+
+<div align="center">
+
+**0 runtime dependencies** · **265 tests** · **7 phase types** · **cross-session resume** · **~4.4k LOC runtime**
+
+</div>
+
+- **Zero runtime dependencies.** No `dependencies` field — the runtime is built entirely on Node built-ins (`fs` / `path` / `os` / `child_process` / `crypto`). The file lock is `fs.openSync("wx")`, not a third-party library.
+- **265 tests across 11 suites** covering concurrency, atomic file locking (8-process race regressions), path-traversal hardening, cross-session resume, gate verdicts, budget caps, retry/backoff, approval flows, sub-flow composition, callback isolation, and the idle watchdog — plus a live end-to-end test that spawns real subagents.
+- **Hardened by design.** Path-traversal defense (lexical + `realpath`), runId validation, HTML/error sanitization, atomic writes, stale-lock stealing via `rename`, and an idle watchdog that kills wedged subagents.
+- **Dogfooded.** Every new feature has to survive the project's own `self-improve` taskflow before it ships.
+
+If this saves you a context window, **drop a ⭐ on [GitHub](https://github.com/heggria/pi-taskflow)** — it genuinely helps.
 
 ## Status & limits
 
-- **v0.0.6** — control flow & reliability: conditional `when` guards, `join: any`
-  OR-joins, declarative `retry`/backoff, `approval` (human-in-the-loop) phases,
-  `flow` (saved sub-flow composition), and run-wide `budget` caps — on top of the
-  DSL + DAG runtime (`agent`/`parallel`/`map`/`gate`/`reduce`),
-  inline + saved flows, cross-session resume, live progress, isolated context.
-  Default `concurrency` is 8 (set on the flow; per-phase `concurrency` overrides
-  for that phase).
-- A run executes as one streaming tool call (live progress while it runs).
-- `map` requires the upstream phase to emit a JSON array (`output: "json"`).
-- Gate verdicts are **fail-open**: if the agent output contains no recognizable
-  verdict marker (`VERDICT: BLOCK/PASS/OK/FAIL/STOP/REJECT/HALT` or
-  `{continue: false}` / `{verdict: "block"}`), the gate passes. This prevents
-  an accidental missing verdict from blocking your workflow.
+**v0.0.10** — full control-flow & reliability layer (`when` guards, `join: any`, `retry`/backoff, `approval`, `flow` composition, `budget` caps) on top of the DSL + DAG runtime (`agent`/`parallel`/`map`/`gate`/`reduce`), inline + saved flows, cross-session resume, live progress, and isolated context. A run executes as one streaming tool call.
 
-### What it doesn't do (yet)
+Known boundaries (tracked, bounded — no surprises mid-flow):
 
-- **No detached background execution.** A run needs the pi session to stay open.
-  True background execution (and event/cron triggers on top of it) is on the
-  roadmap.
-- **No `output: "file"`.** Outputs are text/JSON only. Write files via agent
-  tool calls if needed.
-- **`map` requires a JSON array.** The `over` field must resolve to
-  `{steps.ID.json}` where the upstream phase emitted `output: "json"`. If the
-  source is a plain text list, wrap it in a single-agent phase that outputs JSON.
-- **Cycles are rejected at validation.** The DAG must be acyclic.
+- **No detached background execution.** A run needs the Pi session open. True background execution (and event/cron triggers on top of it) is on the roadmap.
+- **No `output: "file"`.** Outputs are text/JSON only — write files via an agent's `write` tool call.
+- **`map` requires a JSON array.** The `over` field must resolve to a `{steps.ID.json}` array. Wrap a text list in a single-agent `output: "json"` phase first.
+- **The DAG must be acyclic.** Cycles are rejected at validation.
 
 ## Development
 
@@ -395,16 +334,14 @@ model at the definition.
 npm install
 npm run typecheck
 npm test            # unit tests — no network, no process spawning
-
-# real end-to-end (spawns live subagents; needs model access)
-npm run test:e2e
+npm run test:e2e    # real end-to-end (spawns live subagents; needs model access)
 ```
+
+Runtime lives in `extensions/`, tests in `test/`, runnable examples in `examples/`, and the full design rationale in [`DESIGN.md`](./DESIGN.md).
 
 ## Contributing
 
-Contributions welcome! This is a young project — open an issue or PR on
-[GitHub](https://github.com/heggria/pi-taskflow). Tests live in `test/`, the
-runtime in `extensions/`.
+Contributions welcome — this is a young, fast-moving project. Open an issue or PR on [GitHub](https://github.com/heggria/pi-taskflow). Good first contributions: new example flows, phase-type ideas, and TUI polish.
 
 ## License
 

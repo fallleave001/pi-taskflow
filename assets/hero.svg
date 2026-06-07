@@ -1,26 +1,30 @@
-<svg width="1200" height="400" viewBox="0 0 1200 400" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pi-taskflow — declarative multi-phase subagent workflows">
+<svg width="1200" height="460" viewBox="0 0 1200 460" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pi-taskflow — declarative DAG orchestration for Pi subagents: stateful, resumable, context-isolated">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="400" gradientUnits="userSpaceOnUse">
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="460" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0B0E16"/>
       <stop offset="1" stop-color="#0E1322"/>
     </linearGradient>
-    <radialGradient id="glowIndigo" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(170 90) rotate(38) scale(520 360)">
-      <stop offset="0" stop-color="#6E8BFF" stop-opacity="0.30"/>
+    <radialGradient id="glowIndigo" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(150 80) rotate(38) scale(560 380)">
+      <stop offset="0" stop-color="#6E8BFF" stop-opacity="0.32"/>
       <stop offset="1" stop-color="#6E8BFF" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="glowTeal" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1050 360) rotate(-140) scale(560 380)">
-      <stop offset="0" stop-color="#43D9AD" stop-opacity="0.26"/>
+    <radialGradient id="glowTeal" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1060 420) rotate(-140) scale(600 400)">
+      <stop offset="0" stop-color="#43D9AD" stop-opacity="0.28"/>
       <stop offset="1" stop-color="#43D9AD" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="title" x1="360" y1="70" x2="860" y2="140" gradientUnits="userSpaceOnUse">
+    <radialGradient id="glowViolet" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(600 300) rotate(0) scale(420 260)">
+      <stop offset="0" stop-color="#A78BFA" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#A78BFA" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="title" x1="380" y1="76" x2="820" y2="150" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#8AB4FF"/>
       <stop offset="0.5" stop-color="#B692FF"/>
       <stop offset="1" stop-color="#43D9AD"/>
     </linearGradient>
-    <linearGradient id="edge" x1="180" y1="290" x2="1085" y2="290" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#6E8BFF" stop-opacity="0.85"/>
-      <stop offset="0.6" stop-color="#A78BFA" stop-opacity="0.8"/>
-      <stop offset="1" stop-color="#43D9AD" stop-opacity="0.9"/>
+    <linearGradient id="edge" x1="180" y1="340" x2="1085" y2="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6E8BFF" stop-opacity="0.9"/>
+      <stop offset="0.55" stop-color="#A78BFA" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#43D9AD" stop-opacity="0.95"/>
     </linearGradient>
     <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
       <circle cx="1.4" cy="1.4" r="1.4" fill="#9FB0FF" fill-opacity="0.05"/>
@@ -28,91 +32,99 @@
   </defs>
 
   <!-- card -->
-  <rect x="1" y="1" width="1198" height="398" rx="24" fill="url(#bg)"/>
-  <rect x="1" y="1" width="1198" height="398" rx="24" fill="url(#dots)"/>
-  <rect x="1" y="1" width="1198" height="398" rx="24" fill="url(#glowIndigo)"/>
-  <rect x="1" y="1" width="1198" height="398" rx="24" fill="url(#glowTeal)"/>
-  <rect x="1.5" y="1.5" width="1197" height="397" rx="23.5" stroke="#283357" stroke-opacity="0.7"/>
+  <rect x="1" y="1" width="1198" height="458" rx="24" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1198" height="458" rx="24" fill="url(#dots)"/>
+  <rect x="1" y="1" width="1198" height="458" rx="24" fill="url(#glowIndigo)"/>
+  <rect x="1" y="1" width="1198" height="458" rx="24" fill="url(#glowTeal)"/>
+  <rect x="1" y="1" width="1198" height="458" rx="24" fill="url(#glowViolet)"/>
+  <rect x="1.5" y="1.5" width="1197" height="457" rx="23.5" stroke="#283357" stroke-opacity="0.7"/>
 
   <!-- eyebrow chip -->
   <g>
-    <rect x="466" y="40" width="268" height="30" rx="15" fill="#141B30" stroke="#2E3A63"/>
-    <circle cx="488" cy="55" r="4" fill="#43D9AD"/>
-    <text x="504" y="60" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="13" letter-spacing="1.5" fill="#9DA9C9">for the Pi coding agent</text>
+    <rect x="455" y="38" width="290" height="30" rx="15" fill="#141B30" stroke="#2E3A63"/>
+    <circle cx="478" cy="53" r="4" fill="#43D9AD"/>
+    <text x="494" y="58" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="13" letter-spacing="1.4" fill="#9DA9C9">pi install npm:pi-taskflow</text>
   </g>
 
   <!-- title -->
-  <text x="600" y="138" text-anchor="middle" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="74" font-weight="700" letter-spacing="-1" fill="url(#title)">pi-taskflow</text>
+  <text x="600" y="140" text-anchor="middle" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="78" font-weight="700" letter-spacing="-1.5" fill="url(#title)">pi-taskflow</text>
 
   <!-- tagline -->
-  <text x="600" y="178" text-anchor="middle" font-family="system-ui, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#AEB9D6">Declarative, multi-phase subagent workflows — intermediate results stay out of your context.</text>
+  <text x="600" y="180" text-anchor="middle" font-family="system-ui, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="500" fill="#C2CCE6">Declarative DAG orchestration for Pi subagents.</text>
+  <text x="600" y="206" text-anchor="middle" font-family="system-ui, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#8A96B6">Fan out &#183; gate &#183; resume &#183; save as a command &#8212; intermediate results stay out of your context.</text>
+
+  <!-- stat chips -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="12.5" letter-spacing="0.3">
+    <rect x="356" y="228" width="128" height="28" rx="14" fill="#10182B" stroke="#2C3A63"/>
+    <text x="420" y="246" text-anchor="middle" fill="#9FE9D4">0 deps</text>
+    <rect x="492" y="228" width="128" height="28" rx="14" fill="#10182B" stroke="#2C3A63"/>
+    <text x="556" y="246" text-anchor="middle" fill="#B7C2E2">265 tests</text>
+    <rect x="628" y="228" width="146" height="28" rx="14" fill="#10182B" stroke="#2C3A63"/>
+    <text x="701" y="246" text-anchor="middle" fill="#C6B6F2">7 phase types</text>
+  </g>
 
   <!-- ===================== pipeline ===================== -->
   <!-- edges (drawn first, behind nodes) -->
   <g stroke="url(#edge)" stroke-width="2.5" fill="none" stroke-linecap="round">
-    <!-- discover -> map x3 -->
-    <path d="M225 285 C300 285, 300 233, 360 233"/>
-    <path d="M225 285 C300 285, 305 285, 360 285"/>
-    <path d="M225 285 C300 285, 300 337, 360 337"/>
-    <!-- map x3 -> gate -->
-    <path d="M515 233 C595 233, 595 285, 650 285"/>
-    <path d="M515 285 C590 285, 595 285, 650 285"/>
-    <path d="M515 337 C595 337, 595 285, 650 285"/>
-    <!-- gate -> reduce -->
-    <path d="M805 285 C880 285, 880 285, 930 285"/>
+    <path d="M225 340 C300 340, 300 290, 360 290"/>
+    <path d="M225 340 C300 340, 305 340, 360 340"/>
+    <path d="M225 340 C300 340, 300 392, 360 392"/>
+    <path d="M515 290 C595 290, 595 340, 650 340"/>
+    <path d="M515 340 C590 340, 595 340, 650 340"/>
+    <path d="M515 392 C595 392, 595 340, 650 340"/>
+    <path d="M805 340 C880 340, 880 340, 930 340"/>
   </g>
 
-  <!-- arrowheads (right-pointing) -->
+  <!-- arrowheads -->
   <g fill="#9FE9D4">
-    <path d="M360 233 l-11 -6 v12 z"/>
-    <path d="M360 285 l-11 -6 v12 z"/>
-    <path d="M360 337 l-11 -6 v12 z"/>
-    <path d="M650 285 l-11 -6 v12 z"/>
-    <path d="M930 285 l-11 -6 v12 z"/>
+    <path d="M360 290 l-11 -6 v12 z"/>
+    <path d="M360 340 l-11 -6 v12 z"/>
+    <path d="M360 392 l-11 -6 v12 z"/>
+    <path d="M650 340 l-11 -6 v12 z"/>
+    <path d="M930 340 l-11 -6 v12 z"/>
   </g>
 
-  <!-- node helper styling via repeated groups -->
   <!-- discover (agent) -->
   <g>
-    <rect x="75" y="257" width="150" height="56" rx="13" fill="#131A2C" stroke="#33406B"/>
-    <circle cx="98" cy="285" r="5" fill="#6E8BFF"/>
-    <text x="114" y="280" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">discover</text>
-    <text x="114" y="299" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#7C89AE">AGENT</text>
+    <rect x="75" y="312" width="150" height="56" rx="13" fill="#131A2C" stroke="#33406B"/>
+    <circle cx="98" cy="340" r="5" fill="#6E8BFF"/>
+    <text x="114" y="335" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">discover</text>
+    <text x="114" y="354" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#7C89AE">AGENT</text>
   </g>
 
   <!-- map fan-out x3 -->
   <g>
-    <rect x="365" y="205" width="150" height="56" rx="13" fill="#131A2C" stroke="#3B3563"/>
-    <circle cx="388" cy="233" r="5" fill="#A78BFA"/>
-    <text x="404" y="228" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">item · 1</text>
-    <text x="404" y="247" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#9683C6">MAP</text>
+    <rect x="365" y="262" width="150" height="56" rx="13" fill="#131A2C" stroke="#3B3563"/>
+    <circle cx="388" cy="290" r="5" fill="#A78BFA"/>
+    <text x="404" y="285" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">item &#183; 1</text>
+    <text x="404" y="304" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#9683C6">MAP</text>
   </g>
   <g>
-    <rect x="365" y="257" width="150" height="56" rx="13" fill="#131A2C" stroke="#3B3563"/>
-    <circle cx="388" cy="285" r="5" fill="#A78BFA"/>
-    <text x="404" y="280" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">item · 2</text>
-    <text x="404" y="299" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#9683C6">MAP</text>
+    <rect x="365" y="312" width="150" height="56" rx="13" fill="#131A2C" stroke="#3B3563"/>
+    <circle cx="388" cy="340" r="5" fill="#A78BFA"/>
+    <text x="404" y="335" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">item &#183; 2</text>
+    <text x="404" y="354" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#9683C6">MAP</text>
   </g>
   <g>
-    <rect x="365" y="309" width="150" height="56" rx="13" fill="#131A2C" stroke="#3B3563"/>
-    <circle cx="388" cy="337" r="5" fill="#A78BFA"/>
-    <text x="404" y="332" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">item · N</text>
-    <text x="404" y="351" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#9683C6">MAP</text>
+    <rect x="365" y="364" width="150" height="56" rx="13" fill="#131A2C" stroke="#3B3563"/>
+    <circle cx="388" cy="392" r="5" fill="#A78BFA"/>
+    <text x="404" y="387" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">item &#183; N</text>
+    <text x="404" y="406" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#9683C6">MAP</text>
   </g>
 
   <!-- gate -->
   <g>
-    <rect x="655" y="257" width="150" height="56" rx="13" fill="#131A2C" stroke="#5A4A2A"/>
-    <circle cx="678" cy="285" r="5" fill="#F0B45A"/>
-    <text x="694" y="280" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">review</text>
-    <text x="694" y="299" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#C79A56">GATE</text>
+    <rect x="655" y="312" width="150" height="56" rx="13" fill="#131A2C" stroke="#5A4A2A"/>
+    <circle cx="678" cy="340" r="5" fill="#F0B45A"/>
+    <text x="694" y="335" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">review</text>
+    <text x="694" y="354" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#C79A56">GATE</text>
   </g>
 
   <!-- reduce (final) -->
   <g>
-    <rect x="935" y="255" width="150" height="60" rx="13" fill="#10211C" stroke="#2F8E73"/>
-    <circle cx="958" cy="285" r="5" fill="#43D9AD"/>
-    <text x="974" y="280" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">report</text>
-    <text x="974" y="299" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#5FCBAC">REDUCE · final</text>
+    <rect x="935" y="310" width="150" height="60" rx="13" fill="#10211C" stroke="#2F8E73"/>
+    <circle cx="958" cy="340" r="5" fill="#43D9AD"/>
+    <text x="974" y="335" font-family="ui-monospace, Menlo, monospace" font-size="16" font-weight="700" fill="#E7ECF7">report</text>
+    <text x="974" y="354" font-family="ui-monospace, Menlo, monospace" font-size="10.5" letter-spacing="1.5" fill="#5FCBAC">REDUCE &#183; final</text>
   </g>
 </svg>
