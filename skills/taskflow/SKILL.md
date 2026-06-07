@@ -106,7 +106,7 @@ routing. Use `join: "any"` on the merge phase so it runs whichever branch fired:
 { "id": "triage", "type": "agent", "agent": "analyst", "output": "json",
   "task": "Classify the task. Output ONLY {\"route\":\"deep\"} or {\"route\":\"quick\"}." },
 { "id": "deep",  "when": "{steps.triage.json.route} == deep",  "dependsOn": ["triage"], "agent": "analyst", "task": "..." },
-{ "id": "quick", "when": "{steps.triage.json.route} == quick", "dependsOn": ["triage"], "agent": "executor_fast", "task": "..." },
+{ "id": "quick", "when": "{steps.triage.json.route} == quick", "dependsOn": ["triage"], "agent": "executor-fast", "task": "..." },
 { "id": "report", "type": "reduce", "from": ["deep","quick"], "join": "any",
   "dependsOn": ["deep","quick"], "agent": "writer", "task": "...", "final": true }
 ```

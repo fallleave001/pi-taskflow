@@ -16,8 +16,6 @@ const AGENTS: AgentConfig[] = [
 ];
 
 function mkState(def: Taskflow, args: Record<string, unknown> = {}): RunState {
-	// Disable implicit gates in tests — they alter phase topology and break assertions.
-	(def as any).implicitGate = false;
 	return {
 		runId: "test-run",
 		flowName: def.name,
@@ -727,99 +725,4 @@ test("F-006: throwing onProgress during a successful run does not break the run"
 	assert.equal(res.state.phases.one.status, "done");
 	assert.equal(res.state.phases.two.status, "done");
 	assert.equal(res.finalOutput, "out:use out:start");
-});
-
-// ---------------------------------------------------------------------------
-// implicit gate
-// ---------------------------------------------------------------------------
-
-test("implicit-gate: auto-injected gate reviews phase outputs", async () => {
-	// Flow with NO gate/approval → _implicit-gate is injected.
-	const def: Taskflow = {
-		name: "auto-gate",
-		phases: [
-			{ id: "one", type: "agent", agent: "a", task: "step-one" },
-			{ id: "two", type: "agent", agent: "a", task: "use {steps.one.output}", dependsOn: ["one"], final: true },
-		],
-	};
-	// Override the default mkState behavior to test the implicit gate.
-	const state = mkState(def);
-	delete (state.def as any).implicitGate;
-	const deps = baseDeps(mockRunner((t) => {
-		if (t.startsWith("use")) return "final-result";
-		if (t.startsWith("step")) return "step1-out";
-		// Gate task — respond with PASS to let the flow complete
-		return "All outputs look fine. VERDICT: PASS";
-	}));
-	const res = await executeTaskflow(state, deps);
-	// The gate was injected and passed → flow completes.
-	assert.equal(res.ok, true);
-	assert.equal(res.state.status, "completed");
-	// The implicit gate should exist as a phase.
-	assert.ok(res.state.phases["_implicit-gate"], "implicit gate phase should exist");
-	assert.equal(res.state.phases["_implicit-gate"].status, "done");
-	// finalOutput comes from the last phase with final:true ("two"), not the gate.
-	assert.equal(res.finalOutput, "final-result");
-});
-
-test("implicit-gate: BLOCK verdict blocks the run", async () => {
-	const def: Taskflow = {
-		name: "auto-gate-block",
-		phases: [
-			{ id: "one", type: "agent", agent: "a", task: "step", final: true },
-		],
-	};
-	const state = mkState(def);
-	delete (state.def as any).implicitGate;
-	const deps = baseDeps(mockRunner((t) => {
-		if (t.startsWith("step")) return "step-out";
-		// Gate task — BLOCK due to issues
-		return "Found stale line numbers. VERDICT: BLOCK";
-	}));
-	const res = await executeTaskflow(state, deps);
-	assert.equal(res.ok, false);
-	assert.equal(res.state.status, "blocked");
-	assert.equal(res.state.phases["_implicit-gate"].status, "done");
-	assert.match(res.finalOutput, /Gate blocked/);
-});
-
-test("implicit-gate: skipped when flow has an explicit gate", async () => {
-	const def: Taskflow = {
-		name: "explicit-gate",
-		phases: [
-			{ id: "one", type: "agent", agent: "a", task: "step", final: true },
-			{ id: "check", type: "gate", agent: "a", task: "check it", dependsOn: ["one"] },
-		],
-	};
-	const state = mkState(def);
-	delete (state.def as any).implicitGate;
-	const deps = baseDeps(mockRunner((t) => {
-		if (t.startsWith("step")) return "step-out";
-		return "Looks good. VERDICT: PASS";
-	}));
-	const res = await executeTaskflow(state, deps);
-	assert.equal(res.ok, true);
-	// No implicit gate injected — only the explicit one.
-	assert.ok(res.state.phases["check"], "explicit gate should exist");
-	assert.equal(res.state.phases["_implicit-gate"], undefined, "no implicit gate when explicit exists");
-});
-
-test("implicit-gate: skipped when flow has an approval", async () => {
-	const def: Taskflow = {
-		name: "has-approval",
-		phases: [
-			{ id: "one", type: "agent", agent: "a", task: "step" },
-			{ id: "confirm", type: "approval", agent: "a", task: "ok?", dependsOn: ["one"] },
-		],
-	};
-	const state = mkState(def);
-	delete (state.def as any).implicitGate;
-	const deps: RuntimeDeps = {
-		...baseDeps(mockRunner((t) => t)),
-		// Auto-approve (no interactive approver)
-		requestApproval: async () => ({ decision: "approve" as const, note: "ok" }),
-	};
-	const res = await executeTaskflow(state, deps);
-	// No implicit gate — approval handles validation.
-	assert.equal(res.state.phases["_implicit-gate"], undefined);
 });

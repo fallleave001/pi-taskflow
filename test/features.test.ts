@@ -12,8 +12,6 @@ const AGENTS: AgentConfig[] = [
 ];
 
 function mkState(def: Taskflow, args: Record<string, unknown> = {}): RunState {
-	// Disable implicit gates in tests — they alter phase topology and break assertions.
-	(def as any).implicitGate = false;
 	return {
 		runId: "test-run",
 		flowName: def.name,
@@ -93,6 +91,59 @@ test("retry: exhausted attempts still fail the phase", async () => {
 	assert.equal(res.ok, false);
 	assert.equal(res.state.phases.x.status, "failed");
 	assert.equal(res.state.phases.x.attempts, 3); // 1 + 2 retries
+});
+
+test("retry: transient (rate-limit) failure retries by default without an explicit policy", async () => {
+	// No retry policy, but use backoffMs:0 form to keep the test instant.
+	const def: Taskflow = {
+		name: "flaky-429",
+		phases: [{ id: "x", type: "agent", agent: "a", task: "call", retry: { max: 0, backoffMs: 0 }, final: true }],
+	};
+	let calls = 0;
+	const runner: RuntimeDeps["runTask"] = async (_c, _ag, agentName, task) => {
+		calls++;
+		const fail = calls < 3; // two 429s, then success
+		return {
+			agent: agentName,
+			task,
+			exitCode: fail ? 1 : 0,
+			output: fail ? "" : "ok",
+			stderr: fail ? "" : "",
+			usage: { ...emptyUsage(), cost: 0.001 },
+			stopReason: fail ? "error" : "end",
+			errorMessage: fail ? '{"type":"error","error":{"type":"rate_limit_error","code":429}}' : undefined,
+		};
+	};
+	const res = await executeTaskflow(mkState(def), baseDeps(runner));
+	assert.equal(res.ok, true, "transient errors should be retried automatically");
+	assert.equal(calls, 3);
+	assert.equal(res.state.phases.x.status, "done");
+	assert.equal(res.state.phases.x.attempts, 3);
+});
+
+test("retry: non-transient failure does NOT auto-retry without an explicit policy", async () => {
+	const def: Taskflow = {
+		name: "hard-fail",
+		phases: [{ id: "x", type: "agent", agent: "a", task: "call", retry: { max: 0, backoffMs: 0 }, final: true }],
+	};
+	let calls = 0;
+	const runner: RuntimeDeps["runTask"] = async (_c, _ag, agentName, task) => {
+		calls++;
+		return {
+			agent: agentName,
+			task,
+			exitCode: 1,
+			output: "",
+			stderr: "",
+			usage: emptyUsage(),
+			stopReason: "error",
+			errorMessage: "TypeError: cannot read property of undefined",
+		};
+	};
+	const res = await executeTaskflow(mkState(def), baseDeps(runner));
+	assert.equal(res.ok, false);
+	assert.equal(calls, 1, "a hard error with no retry policy must not be retried");
+	assert.equal(res.state.phases.x.status, "failed");
 });
 
 // ---------------------------------------------------------------------------
@@ -291,7 +342,6 @@ test("approval: edit injects guidance passed downstream", async () => {
 test("flow: runs a saved sub-flow and bubbles up its final output", async () => {
 	const subDef: Taskflow = {
 		name: "sub",
-		implicitGate: false,
 		phases: [{ id: "s1", type: "agent", agent: "a", task: "sub {args.x}", final: true }],
 	};
 	const mainDef: Taskflow = {
@@ -315,7 +365,6 @@ test("flow: propagates cwd to sub-flow phases (v0.0.8.1)", async () => {
 	// flow's cwd, causing subagents to run in the wrong directory.
 	const subDef: Taskflow = {
 		name: "sub-cwd",
-		implicitGate: false,
 		phases: [{ id: "s1", type: "agent", agent: "a", task: "do", final: true }],
 	};
 	const mainDef: Taskflow = {
@@ -356,7 +405,6 @@ test("flow: sub-flow phase with its own cwd overrides the flow.cwd", async () =>
 	// Sub-flow phases that set their own `cwd` must still win over `flow.cwd`.
 	const subDef: Taskflow = {
 		name: "sub-per-phase",
-		implicitGate: false,
 		phases: [{ id: "s1", type: "agent", agent: "a", task: "do", cwd: "/per-phase", final: true }],
 	};
 	const mainDef: Taskflow = {
@@ -414,7 +462,6 @@ test("flow: subProgress counts done+failed so renderer's success count is correc
 	// renderer's `done - failed` formula undercounts successes.
 	const subDef: Taskflow = {
 		name: "sub",
-		implicitGate: false,
 		phases: [
 			{ id: "s1", type: "agent", agent: "a", task: "ok-phase" },
 			{ id: "s2", type: "agent", agent: "a", task: "boom-phase", final: true },

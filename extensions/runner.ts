@@ -48,6 +48,20 @@ export function isFailed(r: RunResult): boolean {
 	return r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
 }
 
+/**
+ * Heuristic: did this failure look like a transient/retryable provider error
+ * (rate limit, overload, timeout, 5xx)? Such errors should be retried inside
+ * the taskflow run with backoff rather than bubbled up — otherwise the calling
+ * agent tends to re-invoke the whole tool, producing duplicate progress blocks.
+ */
+const TRANSIENT_ERROR_RE =
+	/rate[_\s-]?limit|too\s+many\s+requests|overloaded|\b429\b|\b503\b|\b502\b|\b504\b|service\s+unavailable|temporarily\s+unavailable|timeout|timed?\s+out|econnreset|etimedout|socket\s+hang\s*up/i;
+export function isTransientError(r: RunResult): boolean {
+	if (r.stopReason === "aborted") return false;
+	const hay = `${r.errorMessage ?? ""} ${r.stderr ?? ""} ${r.output ?? ""}`;
+	return TRANSIENT_ERROR_RE.test(hay);
+}
+
 /** Placeholder written to a failed phase's `output` so downstream interpolation
  *  can detect "upstream failed" without being polluted by raw HTML/JSON. */
 export const TRANSPORT_ERROR_PLACEHOLDER = "(upstream error: subagent failed; see error)";

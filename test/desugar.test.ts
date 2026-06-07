@@ -120,8 +120,6 @@ test("desugar: precedence chain > tasks > task", () => {
 const AGENTS: AgentConfig[] = [{ name: "a", description: "test", systemPrompt: "", source: "user", filePath: "" }];
 
 function mkState(def: ReturnType<typeof desugar>): RunState {
-	// Disable implicit gates in tests — they alter phase topology and break assertions.
-	(def as any).implicitGate = false;
 	return {
 		runId: "t",
 		flowName: def.name,

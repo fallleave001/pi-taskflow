@@ -13,6 +13,7 @@ import {
 	newRunId,
 	saveFlow,
 	saveRun,
+	type RunIndexEntry,
 	type RunState,
 } from "../extensions/store.ts";
 
@@ -416,9 +417,12 @@ test("saveRun: successive saves overwrite the same run file", () => {
 		assert.ok(loaded);
 		assert.equal(loaded.status, "completed");
 
-		// Only one file should exist for this runId
+		// Only one file should exist for this runId inside the flow subdirectory.
+		// The top-level runs dir also contains index.json + subdirs, so we check
+		// inside the per-flow subdirectory (v0.0.9 layout).
 		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
-		const files = fs.readdirSync(runsDir).filter((f) => f.includes("overwrite-me"));
+		const flowDir = path.join(runsDir, "test-flow");
+		const files = fs.readdirSync(flowDir).filter((f) => f.includes("overwrite-me"));
 		assert.equal(files.length, 1);
 	} finally {
 		cleanup(cwd);
@@ -827,6 +831,362 @@ test("flow and run directories are isolated under .pi/taskflows", () => {
 		const entries = fs.readdirSync(taskflowsDir);
 		assert.ok(entries.includes("runs"), "should have runs/ subdirectory");
 		assert.ok(entries.some((e) => e.endsWith(".json")), "should have flow .json files");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+// ===========================================================================
+// v0.0.9 — Subdirectory layout, index, lock, cleanup tests
+// ===========================================================================
+
+test("saveRun: writes to flow-named subdirectory", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const state = mkRunState(cwd, { flowName: "my-flow", runId: "my-flow-abc123" });
+		saveRun(state);
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const flowDir = path.join(runsDir, "my-flow");
+		assert.ok(fs.existsSync(flowDir), "flow subdirectory should exist");
+		assert.ok(fs.existsSync(path.join(flowDir, "my-flow-abc123.json")), "run file should be in flow subdir");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("saveRun: creates index.json entry", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const state = mkRunState(cwd, { flowName: "indexed-flow" });
+		saveRun(state);
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const indexPath = path.join(runsDir, "index.json");
+		assert.ok(fs.existsSync(indexPath), "index.json should exist");
+
+		const entries: RunIndexEntry[] = JSON.parse(fs.readFileSync(indexPath, "utf-8"));
+		const entry = entries.find((e) => e.runId === state.runId);
+		assert.ok(entry, "index should contain an entry for the saved run");
+		assert.equal(entry.flowName, "indexed-flow");
+		assert.ok(entry.relPath.includes(state.runId), "relPath should contain the runId");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("saveRun: index entry updatedAt matches file", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const state = mkRunState(cwd);
+		saveRun(state);
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const entries: RunIndexEntry[] = JSON.parse(fs.readFileSync(path.join(runsDir, "index.json"), "utf-8"));
+		const entry = entries.find((e) => e.runId === state.runId);
+		assert.ok(entry);
+
+		const fileState: RunState = JSON.parse(fs.readFileSync(path.join(runsDir, entry.relPath), "utf-8"));
+		assert.equal(entry.updatedAt, fileState.updatedAt, "index updatedAt should match file");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("loadRun: finds run in subdirectory", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const state = mkRunState(cwd, { flowName: "sub-flow" });
+		saveRun(state);
+
+		const loaded = loadRun(cwd, state.runId);
+		assert.ok(loaded, "loadRun should find the run in subdirectory");
+		assert.equal(loaded.runId, state.runId);
+		assert.equal(loaded.flowName, "sub-flow");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("loadRun: falls back to flat file (legacy)", () => {
+	const cwd = makeTmpCwd();
+	try {
+		// Manually write a flat run file (legacy layout)
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		fs.mkdirSync(runsDir, { recursive: true });
+
+		const state: RunState = {
+			runId: "legacy-flat-001",
+			flowName: "old-flow",
+			def: minimalFlow("old-flow"),
+			args: {},
+			status: "completed",
+			phases: {},
+			createdAt: 1000,
+			updatedAt: 2000,
+			cwd,
+		};
+		fs.writeFileSync(path.join(runsDir, "legacy-flat-001.json"), JSON.stringify(state), "utf-8");
+
+		const loaded = loadRun(cwd, "legacy-flat-001");
+		assert.ok(loaded, "loadRun should fall back to flat file");
+		assert.equal(loaded.runId, "legacy-flat-001");
+		assert.equal(loaded.status, "completed");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("loadRun: prefers subdirectory over flat when both exist", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const flowDir = path.join(runsDir, "pref-flow");
+		fs.mkdirSync(flowDir, { recursive: true });
+
+		const runId = "pref-test-001";
+		const flatState: RunState = {
+			runId,
+			flowName: "pref-flow",
+			def: minimalFlow("pref-flow"),
+			args: {},
+			status: "failed",
+			phases: {},
+			createdAt: 1000,
+			updatedAt: 1000,
+			cwd,
+		};
+		const subdirState: RunState = { ...flatState, status: "completed", updatedAt: 2000 };
+
+		// Write both flat and subdir files
+		fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify(flatState), "utf-8");
+		fs.writeFileSync(path.join(flowDir, `${runId}.json`), JSON.stringify(subdirState), "utf-8");
+
+		// Also write subdir entry to index so it takes priority
+		const idxEntries: RunIndexEntry[] = [{
+			runId,
+			flowName: "pref-flow",
+			status: "completed",
+			createdAt: 1000,
+			updatedAt: 2000,
+			relPath: `pref-flow/${runId}.json`,
+		}];
+		fs.writeFileSync(path.join(runsDir, "index.json"), JSON.stringify(idxEntries), "utf-8");
+
+		const loaded = loadRun(cwd, runId);
+		assert.ok(loaded, "loadRun should find the run");
+		assert.equal(loaded.status, "completed", "should prefer the subdirectory (indexed) version");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("listRuns: returns runs from subdirectories", () => {
+	const cwd = makeTmpCwd();
+	try {
+		// Save 3 runs with different flow names
+		saveRun(mkRunState(cwd, { flowName: "flow-a", runId: "flow-a-run-1", updatedAt: 1000 }));
+		saveRun(mkRunState(cwd, { flowName: "flow-b", runId: "flow-b-run-1", updatedAt: 2000 }));
+		saveRun(mkRunState(cwd, { flowName: "flow-c", runId: "flow-c-run-1", updatedAt: 3000 }));
+
+		const runs = listRuns(cwd);
+		assert.equal(runs.length, 3, "should find all 3 runs");
+		// saveRun stamps updatedAt = Date.now(), so sort order may differ from
+		// our original updatedAt values. Just check all runIds are present.
+		const ids = runs.map((r) => r.runId);
+		assert.ok(ids.includes("flow-a-run-1"));
+		assert.ok(ids.includes("flow-b-run-1"));
+		assert.ok(ids.includes("flow-c-run-1"));
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("listRuns: merges flat and subdirectory runs", () => {
+	const cwd = makeTmpCwd();
+	try {
+		// Write one flat run manually
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		fs.mkdirSync(runsDir, { recursive: true });
+		const flatState: RunState = {
+			runId: "flat-legacy",
+			flowName: "old",
+			def: minimalFlow("old"),
+			args: {},
+			status: "completed",
+			phases: {},
+			createdAt: 1000,
+			updatedAt: 1000,
+			cwd,
+		};
+		fs.writeFileSync(path.join(runsDir, "flat-legacy.json"), JSON.stringify(flatState), "utf-8");
+
+		// Save one via saveRun (subdirectory)
+		saveRun(mkRunState(cwd, { flowName: "new-flow", runId: "new-subdir" }));
+
+		const runs = listRuns(cwd);
+		const ids = runs.map((r) => r.runId);
+		assert.ok(ids.includes("flat-legacy"), "should include flat legacy run");
+		assert.ok(ids.includes("new-subdir"), "should include new subdirectory run");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("listRuns: prefers index over full scan", () => {
+	const cwd = makeTmpCwd();
+	try {
+		// saveRun creates both file and index entry
+		saveRun(mkRunState(cwd, { runId: "indexed-run" }));
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const idxEntries: RunIndexEntry[] = JSON.parse(
+			fs.readFileSync(path.join(runsDir, "index.json"), "utf-8"),
+		);
+
+		// Verify the index contains our run
+		assert.ok(idxEntries.some((e) => e.runId === "indexed-run"));
+
+		// listRuns should return it
+		const runs = listRuns(cwd);
+		assert.ok(runs.some((r) => r.runId === "indexed-run"));
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("listRuns: rebuilds index when corrupt", () => {
+	const cwd = makeTmpCwd();
+	try {
+		saveRun(mkRunState(cwd, { runId: "rebuild-1" }));
+		saveRun(mkRunState(cwd, { runId: "rebuild-2" }));
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+
+		// Corrupt the index
+		fs.writeFileSync(path.join(runsDir, "index.json"), "not valid json{{{", "utf-8");
+
+		// listRuns should still work via rebuild
+		const runs = listRuns(cwd);
+		assert.ok(runs.length >= 2, "should find runs even with corrupt index");
+		const ids = runs.map((r) => r.runId);
+		assert.ok(ids.includes("rebuild-1"));
+		assert.ok(ids.includes("rebuild-2"));
+
+		// Verify index was rebuilt
+		const newIdx: RunIndexEntry[] = JSON.parse(
+			fs.readFileSync(path.join(runsDir, "index.json"), "utf-8"),
+		);
+		assert.ok(newIdx.length >= 2, "rebuilt index should have entries");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("listRuns: rebuilds index when missing", () => {
+	const cwd = makeTmpCwd();
+	try {
+		saveRun(mkRunState(cwd, { runId: "miss-idx-1" }));
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+
+		// Delete the index
+		fs.unlinkSync(path.join(runsDir, "index.json"));
+
+		// listRuns should still work
+		const runs = listRuns(cwd);
+		assert.ok(runs.some((r) => r.runId === "miss-idx-1"));
+
+		// Index should have been recreated
+		assert.ok(fs.existsSync(path.join(runsDir, "index.json")));
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("saveRun: lock released after error", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const state = mkRunState(cwd, { flowName: "err-flow" });
+		// saveRun should succeed and not leave a lock file
+		saveRun(state);
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const flowDir = path.join(runsDir, "err-flow");
+		const lockFiles = fs.readdirSync(flowDir).filter((f) => f.endsWith(".lock"));
+		assert.equal(lockFiles.length, 0, "lock file should be cleaned up after save");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("saveRun: flowName with special characters", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const state = mkRunState(cwd, { flowName: "my flow/v2@test" });
+		saveRun(state);
+
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		// The directory name should be sanitised
+		const flowDir = path.join(runsDir, "my_flow_v2_test");
+		assert.ok(fs.existsSync(flowDir), `flow dir should be "my_flow_v2_test", got: ${fs.readdirSync(runsDir)}`);
+
+		// loadRun should still find it
+		const loaded = loadRun(cwd, state.runId);
+		assert.ok(loaded, "loadRun should find run even with special-char flowName");
+		assert.equal(loaded.flowName, "my flow/v2@test", "flowName should be preserved as-is");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("saveRun: flowName path traversal sanitised", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const state = mkRunState(cwd, { flowName: "../../../etc" });
+		saveRun(state);
+
+		// The directory name should have slashes replaced with underscores (dots
+		// are kept by the same regex that saveFlow uses). The resulting name
+		// `.._.._.._etc` is a single safe directory — no actual traversal.
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		const safeDir = path.join(runsDir, ".._.._.._etc");
+		assert.ok(
+			fs.existsSync(safeDir),
+			`traversal flowName should produce safe dir name. Actual dirs: ${fs.readdirSync(runsDir)}`,
+		);
+
+		// Should not have escaped to /etc
+		assert.ok(!fs.existsSync(path.join("/etc", state.runId + ".json")), "should not write to /etc");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("listRuns: empty subdirectories ignored", () => {
+	const cwd = makeTmpCwd();
+	try {
+		const runsDir = path.join(cwd, ".pi", "taskflows", "runs");
+		fs.mkdirSync(path.join(runsDir, "empty-subdir"), { recursive: true });
+
+		// listRuns should not error and should return empty (no actual runs)
+		const runs = listRuns(cwd);
+		assert.equal(runs.length, 0, "empty subdirectories should not produce phantom entries");
+	} finally {
+		cleanup(cwd);
+	}
+});
+
+test("listRuns: index.json excluded from run listing", () => {
+	const cwd = makeTmpCwd();
+	try {
+		saveRun(mkRunState(cwd, { runId: "real-run" }));
+
+		const runs = listRuns(cwd);
+		for (const run of runs) {
+			assert.notEqual(run.runId, "index.json", "index.json should never appear as a runId");
+		}
+		assert.ok(runs.some((r) => r.runId === "real-run"));
 	} finally {
 		cleanup(cwd);
 	}

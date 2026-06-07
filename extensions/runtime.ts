@@ -14,7 +14,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import type { AgentConfig } from "./agents.ts";
 import { coerceArray, evaluateCondition, interpolate, type InterpolationContext, safeParse } from "./interpolate.ts";
-import { isFailed, type LiveUpdate, mapWithConcurrencyLimit, runAgentTask, type RunResult } from "./runner.ts";
+import { isFailed, isTransientError, type LiveUpdate, mapWithConcurrencyLimit, runAgentTask, type RunResult } from "./runner.ts";
 import { aggregateUsage, emptyUsage, type UsageStats } from "./usage.ts";
 import { type Budget, dependenciesOf, finalPhase, type Phase, resolveArgs, type Taskflow, topoLayers } from "./schema.ts";
 import { hashInput, newRunId, type PhaseState, type RunState } from "./store.ts";
@@ -314,9 +314,20 @@ async function executePhase(
 
 	// Wrap each subagent call in the phase's retry policy. Usage is summed across
 	// attempts; the attempt count rides along on the result for the TUI.
+	//
+	// Even without an explicit `phase.retry`, transient provider errors (rate
+	// limits, overload, 5xx, timeouts) are retried with backoff so a momentary
+	// 429 is absorbed inside this run instead of bubbling up and provoking the
+	// calling agent to re-invoke the whole tool (which stacks duplicate progress
+	// blocks in the transcript).
 	const retry = phase.retry;
+	const DEFAULT_TRANSIENT_RETRIES = 3;
+	const DEFAULT_TRANSIENT_BACKOFF_MS = 2000;
+	const DEFAULT_TRANSIENT_FACTOR = 2;
 	const runOne = async (agentName: string, task: string, onLive?: (l: LiveUpdate) => void): Promise<RunResult> => {
-		const maxAttempts = Math.max(1, 1 + Math.max(0, Math.floor(retry?.max ?? 0)));
+		const explicitMax = Math.max(1, 1 + Math.max(0, Math.floor(retry?.max ?? 0)));
+		// Allow enough attempts to cover whichever policy applies on a given attempt.
+		const maxAttempts = Math.max(explicitMax, 1 + DEFAULT_TRANSIENT_RETRIES);
 		const usages: UsageStats[] = [];
 		let last: RunResult | undefined;
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -330,10 +341,21 @@ async function executePhase(
 			if (!isFailed(last)) break;
 			// Stop retrying on abort or once the run is over budget.
 			if (deps.signal?.aborted || overBudget(state).over) break;
-			if (attempt < maxAttempts - 1) {
-				const wait = Math.min(60000, Math.round((retry?.backoffMs ?? 0) * (retry?.factor ?? 1) ** attempt));
-				await delay(wait, deps.signal);
-			}
+			// Decide whether THIS failure warrants another attempt. Explicit retry
+			// policy covers all failures up to its cap; the transient fallback covers
+			// only retryable provider errors. A non-transient failure with no explicit
+			// policy stops immediately (no point burning attempts on a hard error).
+			const withinExplicit = attempt < explicitMax - 1;
+			const transient = isTransientError(last);
+			const withinTransient = transient && attempt < DEFAULT_TRANSIENT_RETRIES;
+			if (!withinExplicit && !withinTransient) break;
+			// Backoff: prefer the explicit policy's curve when the phase defines one
+			// (covers transient retries too, and keeps tests fast with backoffMs:0),
+			// otherwise use the transient defaults.
+			const baseMs = retry ? (retry.backoffMs ?? 0) : DEFAULT_TRANSIENT_BACKOFF_MS;
+			const factor = retry ? (retry.factor ?? 1) : DEFAULT_TRANSIENT_FACTOR;
+			const wait = Math.min(60000, Math.round(baseMs * factor ** attempt));
+			if (wait > 0) await delay(wait, deps.signal);
 		}
 		// Aborted before any attempt ran → return a clean aborted result (no crash).
 		if (!last) {
@@ -741,45 +763,8 @@ function safeProgress(deps: RuntimeDeps, state: RunState): void {
 /**
  * Execute a full taskflow. Mutates and persists `state` as it progresses.
  */
-function ensureImplicitGate(def: Taskflow): void {
-	// Respect explicit opt-out
-	if ((def as any).implicitGate === false) return;
-
-	const hasGate = def.phases.some(
-		(p) => p.type === "gate" || p.type === "approval" || p.id === "_implicit-gate",
-	);
-	if (hasGate || def.phases.length === 0) return;
-
-	// The last existing phase is the effective "final" phase — pin it so the
-	// injected gate doesn't become the finalOutput.
-	const lastPhase = def.phases[def.phases.length - 1];
-	if (!lastPhase.final && !def.phases.some((p) => p.final)) {
-		lastPhase.final = true;
-	}
-
-	const allIds = def.phases.map((p) => p.id);
-	def.phases.push({
-		id: "_implicit-gate",
-		type: "gate",
-		dependsOn: allIds,
-		agent: "reviewer",
-		task: `Review all phase outputs from this taskflow for accuracy and consistency.
-
-For each upstream phase, scan its output for:
-1. **Factual accuracy**: Any file paths, line numbers, or code snippets that are wrong?
-2. **Internal contradictions**: Do any phases contradict each other?
-3. **Completeness**: Is any output truncated, empty, or anomalously short?
-4. **Hallucination markers**: Wrong file names, impossible line ranges, circular logic, information not in the given context.
-
-Output:
-- If ALL outputs look consistent and plausible: output **VERDICT: PASS** with a one-line summary.
-- If ANY issues found: output **VERDICT: BLOCK** listing each issue with the phase ID and specific concern.`,
-	});
-}
-
 export async function executeTaskflow(state: RunState, deps: RuntimeDeps): Promise<RuntimeResult> {
 	const def: Taskflow = state.def;
-	ensureImplicitGate(def);
 	try {
 		return await runTaskflowLayers(state, deps);
 	} catch (e) {

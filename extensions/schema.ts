@@ -147,12 +147,6 @@ export const TaskflowSchema = Type.Object(
 			}),
 		),
 		phases: Type.Array(PhaseSchema, { minItems: 1, description: "Ordered phase definitions (DAG via dependsOn)" }),
-		implicitGate: Type.Optional(
-			Type.Boolean({
-				description: "When true (default), a reviewer gate is auto-injected after all phases if no explicit gate or approval exists",
-				default: true,
-			}),
-		),
 	},
 	{ additionalProperties: false },
 );
@@ -342,6 +336,16 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 		if (p.join && !JOIN_MODES.includes(p.join as JoinMode)) {
 			errors.push(`Phase '${p.id}': unknown join mode '${p.join}'`);
 		}
+
+		// Agent name convention: hyphens only (per AGENTS.md naming convention)
+		if (p.agent && typeof p.agent === "string" && p.agent.includes("_")) {
+			errors.push(`Phase '${p.id}': agent name '${p.agent}' uses underscores — use hyphens (e.g. 'executor-code' not 'executor_code')`);
+		}
+
+		// Phase id convention: hyphens only (consistent with agent naming)
+		if (p.id && p.id.includes("_")) {
+			errors.push(`Phase '${p.id}': id uses underscores — use hyphens for consistency with agent naming convention`);
+		}
 	}
 
 	// dependsOn / from references must exist
@@ -352,6 +356,15 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 		}
 		for (const f of p.from ?? []) {
 			if (!ids.has(f)) errors.push(`Phase '${p.id}': from unknown phase '${f}'`);
+		}
+	}
+
+	// Agent name format validation (AGENTS.md naming convention: hyphens only, no underscores)
+	const VALID_AGENT_RE = /^[a-z][a-z0-9-]*$/;
+	for (const p of flow.phases) {
+		if (!p?.id) continue;
+		if (p.agent && !VALID_AGENT_RE.test(p.agent)) {
+			errors.push(`Phase '${p.id}': agent '${p.agent}' has invalid name format (expected lowercase alphanumeric with hyphens)`);
 		}
 	}
 

@@ -25,7 +25,7 @@
     {
       "id": "implement",
       "type": "agent",
-      "agent": "executor_code",
+      "agent": "executor-code",
       "dependsOn": ["approve", "plan"],
       "task": "Implement the approved plan for {args.target}.\nPlan:\n{steps.plan.output}\nExtra human guidance (if any):\n{steps.approve.output}",
       "retry": { "max": 1, "backoffMs": 1000 }
