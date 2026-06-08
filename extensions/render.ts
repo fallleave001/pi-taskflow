@@ -225,6 +225,21 @@ function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme): st
 		if (ps.warnings?.length) l += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 		return l;
 	}
+	if (ps.tournament) {
+		const { variants, winner, mode } = ps.tournament;
+		let w =
+			theme.fg("toolTitle", `⚑ ${variants}→`) +
+			theme.fg("success", mode === "aggregate" ? "aggregate" : `#${winner}`);
+		if (ps.tournament.reason) {
+			const r = ps.tournament.reason.replace(/\s+/g, " ");
+			w += theme.fg("dim", ` ${r.length > 36 ? `${r.slice(0, 36)}…` : r}`);
+		}
+		const cost = costStr(ps.usage, theme);
+		if (cost) w += `  ${cost}`;
+		if (time) w += `  ${time}`;
+		if (ps.warnings?.length) w += theme.fg("warning", `  ⚠${ps.warnings.length}`);
+		return w;
+	}
 	let s = roleLabel;
 	if (cost) s += `  ${cost}`;
 	if (ps.attempts && ps.attempts > 1) s += theme.fg("warning", `  ↻${ps.attempts - 1}`);

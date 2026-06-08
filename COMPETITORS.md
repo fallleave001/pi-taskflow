@@ -62,7 +62,7 @@
 | 5 | **Budget-aware DAG with hard enforcement** | all track, none enforce | budget pools + pre-flight cost estimation |
 | 6 | **Subagent-native orchestration** | none targets a coding agent's internal subagent pipeline | defensible specialization for Pi's AGENTS.md routing |
 | 7 | **Worktree-isolated phase execution** | none isolates per-phase filesystem | worktree-per-phase with explicit merge |
-| 8 | **Tournament/bracket pattern** | none has rank-and-promote | `tournament` phase type |
+| 8 | **Tournament/bracket pattern** | none has rank-and-promote | `tournament` phase type — **✅ shipped** |
 | 9 | **Loop-until-done with convergence detection** | LangGraph has cycles, none has declarative convergence loop | `loop` phase type |
 
 ## Key Insights

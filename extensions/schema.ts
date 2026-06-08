@@ -13,12 +13,18 @@ import { Type, type Static } from "typebox";
 // Phase types
 // ---------------------------------------------------------------------------
 
-export const PHASE_TYPES = ["agent", "parallel", "map", "gate", "reduce", "approval", "flow", "loop"] as const;
+export const PHASE_TYPES = ["agent", "parallel", "map", "gate", "reduce", "approval", "flow", "loop", "tournament"] as const;
 export type PhaseType = (typeof PHASE_TYPES)[number];
 
 /** Loop iteration bounds. Authors may lower the max; the hard cap is a runaway guard. */
 export const LOOP_DEFAULT_MAX_ITERATIONS = 10;
 export const LOOP_HARD_MAX_ITERATIONS = 100;
+
+/** Tournament competitor bounds. */
+export const TOURNAMENT_DEFAULT_VARIANTS = 3;
+export const TOURNAMENT_HARD_MAX_VARIANTS = 20;
+export const TOURNAMENT_MODES = ["best", "aggregate"] as const;
+export type TournamentMode = (typeof TOURNAMENT_MODES)[number];
 
 export const OUTPUT_FORMATS = ["text", "json"] as const;
 export const JOIN_MODES = ["all", "any"] as const;
@@ -27,7 +33,7 @@ export type CacheScope = (typeof CACHE_SCOPES)[number];
 /** Allowed fingerprint entry prefixes. `glob!:` = content-hash variant of `glob:`. */
 export const CACHE_FINGERPRINT_PREFIXES = ["git:", "glob:", "glob!:", "file:", "env:"] as const;
 /** Phase types that must NOT be cached across runs (a fresh result is required each run). */
-export const CACHE_CROSS_RUN_BLOCKED_TYPES = ["gate", "approval", "loop"] as const;
+export const CACHE_CROSS_RUN_BLOCKED_TYPES = ["gate", "approval", "loop", "tournament"] as const;
 
 const ParallelTaskSchema = Type.Object(
 	{
@@ -137,6 +143,30 @@ const PhaseSchema = Type.Object(
 				description:
 					"[loop] When true (default), stop early if an iteration's output is identical to the previous one (a fixed point — further iterations would not change anything).",
 				default: true,
+			}),
+		),
+
+		// tournament: N variants compete, a judge picks the best (or aggregates)
+		variants: Type.Optional(
+			Type.Number({
+				description: `[tournament] Number of competing variants to spawn from 'task' (default ${TOURNAMENT_DEFAULT_VARIANTS}, max ${TOURNAMENT_HARD_MAX_VARIANTS}). Ignored when 'branches' is provided (those become the variants instead).`,
+				default: TOURNAMENT_DEFAULT_VARIANTS,
+			}),
+		),
+		judge: Type.Optional(
+			Type.String({
+				description:
+					"[tournament] Judge prompt. The numbered variant outputs are injected before it. To pick a winner, end with a line like 'WINNER: <n>' or return JSON {\"winner\": <n>}. Defaults to a sensible built-in rubric.",
+			}),
+		),
+		judgeAgent: Type.Optional(
+			Type.String({ description: "[tournament] Agent that runs the judge step (defaults to the phase 'agent')." }),
+		),
+		mode: Type.Optional(
+			StringEnum(TOURNAMENT_MODES, {
+				description:
+					"[tournament] 'best' (default): output is the winning variant verbatim. 'aggregate': output is the judge's synthesized answer combining the variants.",
+				default: "best",
 			}),
 		),
 
@@ -407,6 +437,25 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 				} else if (p.maxIterations > LOOP_HARD_MAX_ITERATIONS) {
 					errors.push(`Phase '${p.id}' (loop): maxIterations must be <= ${LOOP_HARD_MAX_ITERATIONS}`);
 				}
+			}
+		}
+		if (type === "tournament") {
+			const hasBranches = Array.isArray(p.branches) && p.branches.length > 0;
+			if (!hasBranches && !p.task) {
+				errors.push(`Phase '${p.id}' (tournament) requires 'task' (the competitor prompt) or non-empty 'branches'`);
+			}
+			if (p.variants !== undefined) {
+				if (typeof p.variants !== "number" || !Number.isFinite(p.variants) || p.variants < 2) {
+					errors.push(`Phase '${p.id}' (tournament): variants must be a number >= 2`);
+				} else if (p.variants > TOURNAMENT_HARD_MAX_VARIANTS) {
+					errors.push(`Phase '${p.id}' (tournament): variants must be <= ${TOURNAMENT_HARD_MAX_VARIANTS}`);
+				}
+			}
+			if (hasBranches && p.branches!.length < 2) {
+				errors.push(`Phase '${p.id}' (tournament): 'branches' needs at least 2 competitors`);
+			}
+			if (p.mode && !TOURNAMENT_MODES.includes(p.mode as TournamentMode)) {
+				errors.push(`Phase '${p.id}' (tournament): unknown mode '${p.mode}'`);
 			}
 		}
 		if (p.retry) {

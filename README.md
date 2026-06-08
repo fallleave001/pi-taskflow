@@ -230,6 +230,7 @@ No scripting. No `eval`. Just data the runtime executes — safe enough to run L
 | `approval` | **human-in-the-loop** pause — approve / reject / edit | — |
 | `flow` | run a **saved sub-flow** as one phase (composition) | `use` |
 | `loop` | **iterate a task until done** — re-run a body until a condition, convergence, or a cap | `task`, `until` |
+| `tournament` | **N variants compete**, a judge picks the best (or aggregates) | `task` \| `branches` |
 
 ### Common phase fields
 
@@ -281,6 +282,27 @@ Some work is inherently iterative — refine a draft until a reviewer is satisfi
 - **`until`** — evaluated after each iteration with the iteration's output exposed as `{steps.<thisId>.output}` / `.json`. Same operators as `when`. The loop stops the moment it's truthy.
 - **Always terminates.** Three independent stops: `until` truthy, **convergence** (a fixed point — output identical to the previous iteration), or **`maxIterations`** (hard-capped at 100). A malformed `until` **stops** the loop rather than spinning forever (fail-safe), and a failing iteration fails the phase with the partial output preserved.
 - The TUI shows `↻N` with the stop reason (`done` / `converged` / `max` / `failed`); usage is summed across iterations. Like `gate`/`approval`, `loop` is **excluded from `cross-run` cache** (each run must iterate fresh).
+
+### Tournament (`tournament`)
+
+For open-ended work, the best result often comes from generating several candidates and picking the strongest — best-of-N with a judge, in one declarative phase:
+
+```jsonc
+{
+  "id": "headline",
+  "type": "tournament",
+  "task": "Write a punchy headline for this launch post.",
+  "variants": 4,                    // spawn 4 competitors of the SAME task (default 3, max 20)
+  "judge": "Pick the headline with the strongest hook and clearest promise.",
+  "judgeAgent": "reviewer",          // optional; defaults to the phase agent
+  "mode": "best"                     // "best" (default) | "aggregate"
+}
+```
+
+- **Competitors** — either `variants: N` copies of one `task` (diversity comes from model nondeterminism), or distinct `branches: [{task, agent?}, …]` when you want to pit *different approaches* against each other.
+- **Judge** — after the fan-out, one judge agent sees every variant (numbered) plus your `judge` rubric and picks a winner via a `WINNER: <n>` line or `{"winner": n}`. An unreadable verdict **fails open** to variant 1; a failed judge falls back too — the work is never lost.
+- **`mode`** — `best` returns the winning variant **verbatim**; `aggregate` returns the judge's **synthesized** answer combining the strongest parts.
+- **Short-circuits:** if only one competitor survives, it wins with no judge call; if all fail, the phase fails. The TUI shows `⚑ N→#k`; usage sums variants + judge. Like `gate`, it's **excluded from `cross-run` cache**.
 - **`budget`** — a run-wide `{maxUSD, maxTokens}` ceiling; once exceeded, pending phases skip and in-flight fan-out stops spawning, ending the run as `blocked`.
 - **idle watchdog** — a subagent that goes silent for 5 minutes is treated as wedged and killed (SIGTERM → SIGKILL), so one hung child can never freeze the whole flow.
 

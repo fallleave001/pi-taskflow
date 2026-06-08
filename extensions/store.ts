@@ -60,6 +60,8 @@ export interface PhaseState {
 	approval?: { decision: "approve" | "reject" | "edit"; note?: string; auto?: boolean };
 	/** Loop iteration accounting (loop phases only). */
 	loop?: { iterations: number; stop: "until" | "converged" | "maxIterations" | "failed" };
+	/** Tournament outcome (tournament phases only). */
+	tournament?: { variants: number; winner: number; mode: "best" | "aggregate"; reason?: string };
 	/** Non-fatal diagnostic warnings accumulated during this phase (e.g.
 	 *  unresolved interpolation placeholders, suspicious templates). */
 	warnings?: string[];

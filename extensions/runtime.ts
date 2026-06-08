@@ -16,7 +16,7 @@ import type { AgentConfig } from "./agents.ts";
 import { coerceArray, evaluateCondition, interpolate, type InterpolationContext, safeParse, tryEvaluateCondition } from "./interpolate.ts";
 import { isFailed, isTransientError, type LiveUpdate, mapWithConcurrencyLimit, runAgentTask, type RunResult } from "./runner.ts";
 import { aggregateUsage, emptyUsage, type UsageStats } from "./usage.ts";
-import { type Budget, type CacheScope, dependenciesOf, finalPhase, LOOP_DEFAULT_MAX_ITERATIONS, LOOP_HARD_MAX_ITERATIONS, parseTtlMs, type Phase, resolveArgs, type Taskflow, topoLayers } from "./schema.ts";
+import { type Budget, type CacheScope, dependenciesOf, finalPhase, LOOP_DEFAULT_MAX_ITERATIONS, LOOP_HARD_MAX_ITERATIONS, parseTtlMs, type Phase, resolveArgs, type Taskflow, topoLayers, TOURNAMENT_DEFAULT_VARIANTS, TOURNAMENT_HARD_MAX_VARIANTS, type TournamentMode } from "./schema.ts";
 import { hashInput, newRunId, type PhaseState, type RunState } from "./store.ts";
 import { CacheStore, resolveFingerprint } from "./cache.ts";
 
@@ -731,6 +731,111 @@ async function executePhase(
 		};
 	}
 
+	// tournament: spawn N competing variants, then a judge picks the best (or
+	// synthesizes an aggregate). Combines the parallel fan-out with a gate-style
+	// verdict, expressed as a single declarative phase.
+	if (type === "tournament") {
+		const mode = (phase.mode ?? "best") as TournamentMode;
+		// Competitors: explicit `branches` win; otherwise N copies of `task`.
+		let competitors: Array<{ agent: string; task: string }>;
+		if (phase.branches && phase.branches.length > 0) {
+			competitors = phase.branches.map((b) => ({
+				agent: resolveAgent(b.agent ?? phase.agent, deps, state),
+				task: preRead + interpolate(b.task, ctx).text,
+			}));
+		} else {
+			const n = Math.max(2, Math.min(TOURNAMENT_HARD_MAX_VARIANTS, Math.floor(phase.variants ?? TOURNAMENT_DEFAULT_VARIANTS)));
+			const body = preRead + interpolate(phase.task ?? "", ctx).text;
+			competitors = Array.from({ length: n }, () => ({ agent: resolveAgent(phase.agent, deps, state), task: body }));
+		}
+
+		const results = await runFanout(competitors);
+		const ran = results.filter((r) => r.stopReason !== "budget-skipped");
+		const ok = ran.filter((r) => !isFailed(r));
+		const variantUsage = aggregateUsage(results.map((r) => r.usage));
+
+		// All competitors failed → the tournament fails (nothing to judge).
+		if (ok.length === 0) {
+			return {
+				id: phase.id,
+				status: "failed",
+				usage: variantUsage,
+				error: `tournament '${phase.id}': all ${competitors.length} variants failed`,
+				tournament: { variants: competitors.length, winner: 0, mode },
+				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				endedAt: Date.now(),
+			};
+		}
+		// Only one competitor survived → no contest; it wins by default (skip judge).
+		if (ok.length === 1) {
+			const onlyIdx = results.indexOf(ok[0]) + 1;
+			return {
+				id: phase.id,
+				status: "done",
+				output: ok[0].output,
+				json: parseJson ? safeParse(ok[0].output) : undefined,
+				usage: variantUsage,
+				model: ok[0].model,
+				tournament: { variants: competitors.length, winner: onlyIdx, mode, reason: "only surviving variant" },
+				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				endedAt: Date.now(),
+			};
+		}
+
+		// Build the judge prompt: label every variant output, then the rubric.
+		const labelled = ran
+			.map((r, i) => `### Variant ${i + 1}${isFailed(r) ? " (failed — ineligible)" : ""}\n\n${r.output}`)
+			.join("\n\n---\n\n");
+		const rubric =
+			interpolate(phase.judge ?? "", ctx).text.trim() ||
+			"You are judging competing answers to the same task. Pick the single best variant on correctness, completeness, and clarity.";
+		const directive =
+			mode === "best"
+				? `End your reply with a line exactly: WINNER: <number> (1–${ran.length}), choosing the strongest eligible variant.`
+				: `Synthesize the strongest possible answer by combining the best parts of the eligible variants. Then end with a line: WINNER: <number> indicating which variant contributed most.`;
+		const judgeTask = `${rubric}\n\nThe candidate variants:\n\n${labelled}\n\n${directive}`;
+		const judgeAgent = resolveAgent(phase.judgeAgent ?? phase.agent, deps, state);
+		const judgeRes = await runOne(judgeAgent, judgeTask, liveSink(state, phase.id, emitProgress));
+		const judgeUsage = aggregateUsage([variantUsage, judgeRes.usage]);
+
+		if (isFailed(judgeRes)) {
+			// Judge failed: fall back to variant 1 (fail-open, never lose the work).
+			return {
+				id: phase.id,
+				status: "done",
+				output: ok[0].output,
+				json: parseJson ? safeParse(ok[0].output) : undefined,
+				usage: judgeUsage,
+				model: ok[0].model,
+				warnings: [`judge failed (${judgeRes.errorMessage ?? "error"}); defaulted to variant 1`],
+				tournament: { variants: competitors.length, winner: results.indexOf(ok[0]) + 1, mode, reason: "judge failed" },
+				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				endedAt: Date.now(),
+			};
+		}
+
+		const { winner, reason } = parseTournamentWinner(judgeRes.output, ran.length);
+		const winnerResult = ran[winner - 1];
+		const winnerIneligible = !winnerResult || isFailed(winnerResult);
+		// In 'best' mode the output is the winning variant verbatim; in 'aggregate'
+		// mode it is the judge's synthesized answer.
+		const chosen = winnerIneligible ? ok[0] : winnerResult;
+		const winnerIdx = results.indexOf(chosen) + 1;
+		const output = mode === "aggregate" ? judgeRes.output : chosen.output;
+		return {
+			id: phase.id,
+			status: "done",
+			output,
+			json: parseJson ? safeParse(output) : undefined,
+			usage: judgeUsage,
+			model: mode === "aggregate" ? judgeRes.model : chosen.model,
+			warnings: winnerIneligible ? [`judge picked an ineligible variant; used variant ${winnerIdx}`] : undefined,
+			tournament: { variants: competitors.length, winner: winnerIdx, mode, reason },
+			inputHash: hashInput(phase.id, "tournament", String(competitors.length), mode),
+			endedAt: Date.now(),
+		};
+	}
+
 	return {
 		id: phase.id,
 		status: "failed",
@@ -896,6 +1001,29 @@ export function parseGateVerdict(output: string): { verdict: "pass" | "block"; r
 
 function asReason(v: unknown): string | undefined {
 	return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+/**
+ * Parse a judge's pick of the winning variant. Accepts JSON ({"winner":n} or
+ * {"best":n}) or a `WINNER: n` line (last match wins). Clamps to [1, count].
+ * Fail-open: an unreadable verdict defaults to variant 1 so the work is never
+ * lost. Returns the 1-based index plus an optional reason.
+ */
+export function parseTournamentWinner(output: string, count: number): { winner: number; reason?: string } {
+	const clamp = (n: number) => Math.min(Math.max(1, Math.floor(n)), Math.max(1, count));
+	const json = safeParse(output);
+	if (json && typeof json === "object") {
+		const o = json as Record<string, unknown>;
+		const raw = o.winner ?? o.best ?? o.choice;
+		const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+		if (Number.isFinite(n)) return { winner: clamp(n), reason: asReason(o.reason) };
+	}
+	const matches = [...output.matchAll(/WINNER\s*[:=]\s*#?\s*(\d+)/gi)];
+	if (matches.length) {
+		const n = Number(matches[matches.length - 1][1]);
+		if (Number.isFinite(n)) return { winner: clamp(n) };
+	}
+	return { winner: 1, reason: "no parseable winner; defaulted to variant 1" };
 }
 
 /**
