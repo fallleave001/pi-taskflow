@@ -282,7 +282,7 @@ export default function (pi: ExtensionAPI) {
 		name: "taskflow",
 		label: "Taskflow",
 		description: [
-			"Orchestrate subagents — the ONLY delegation tool. Fully replaces the built-in subagent tool.",
+			"IMPORTANT: Before using this tool for the first time in a session, invoke skill_load('taskflow') to read the full documentation (DSL syntax, examples, best practices). This tool description is a reference, not a tutorial.",
 			"Shorthand (same API as subagent): pass `task` (+optional `agent`) for one task, `tasks:[{task,agent?}]` for parallel, or `chain:[{task,agent?}]` for sequential (use {previous.output}).",
 			"DSL: use action=run with an inline `define` (you write the DAG) or a saved `name`. Phases (agent, parallel, map, gate, reduce, approval, flow, loop, tournament) form a DAG; intermediate outputs stay out of your context — only the final phase output is returned.",
 			"Every delegation is tracked (runId), resumable across sessions, and saveable as /tf:<name> via action=save.",
@@ -293,7 +293,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: TaskflowParams,
 		promptSnippet: "Orchestrate subagents — single, parallel, chain, or DAG — with tracking, resume, and context isolation. Replaces the subagent tool.",
 		promptGuidelines: [
-			"Use taskflow for ALL delegation — single tasks, parallel, chain, or full DAG orchestration. It fully replaces the subagent tool: every delegation is tracked with a runId, resumable across sessions, context-isolated (only final output returns), and saveable as /tf:<name>. Do NOT call the subagent tool directly; use taskflow shorthand (task/tasks/chain) for simple cases instead.",
+			"BEFORE FIRST USE: invoke skill_load('taskflow') to read the full skill documentation (DSL syntax, phase types, examples, best practices). This tool description is a condensed reference only — the skill is the authoritative guide.\n\nUse taskflow for ALL delegation — single tasks, parallel, chain, or full DAG orchestration. It fully replaces the subagent tool: every delegation is tracked with a runId, resumable across sessions, context-isolated (only final output returns), and saveable as /tf:<name>. Do NOT call the subagent tool directly; use taskflow shorthand (task/tasks/chain) for simple cases instead.",
 			"For complex multi-phase work (explore / 审计 / analyze the project, auditing endpoints, reviewing or migrating many files/modules, cross-checked research), use the full DSL with phases. For taskflow map phases, have the upstream phase emit a JSON array and set output:'json'.",
 			"For taskflow map phases, have the upstream phase emit a JSON array and set output:'json'.",
 		],
