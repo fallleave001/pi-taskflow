@@ -261,3 +261,53 @@ test("tournament: usage sums variants + judge", async () => {
 	// 3 variants + 1 judge = 4 turns
 	assert.equal(res.state.phases.p.usage?.turns, 4);
 });
+
+test("tournament: judge picks an ineligible (failed) variant → falls back to an eligible one (P1-3)", async () => {
+	const def: Taskflow = {
+		name: "ineligible",
+		phases: [{ id: "p", type: "tournament", agent: "a", judgeAgent: "judge", task: "t", variants: 3, final: true }],
+	};
+	let n = 0;
+	// Variant 2 fails; the judge (wrongly) picks variant 2 — the runtime must
+	// detect the ineligible pick and fall back to an eligible variant.
+	const runTask = runnerFrom((_t, agent) => {
+		if (agent === "judge") return { output: "WINNER: 2" };
+		n++;
+		return n === 2 ? { output: "", fail: true } : { output: `eligible ${n}` };
+	});
+	const res = await executeTaskflow(mkState(def), baseDeps(runTask));
+
+	assert.equal(res.ok, true);
+	assert.ok((res.state.phases.p.warnings ?? []).some((w) => /ineligible/i.test(w)), JSON.stringify(res.state.phases.p.warnings));
+	// The chosen output must be an eligible variant, never the failed one.
+	assert.ok(/^eligible /.test(res.finalOutput), `expected an eligible variant, got: ${res.finalOutput}`);
+	assert.notEqual(res.state.phases.p.tournament?.winner, 2, "reported winner must not be the failed variant");
+});
+
+test("tournament: reported winner number is relative to the variants the judge saw (P2-1)", async () => {
+	// Two variants produce BYTE-IDENTICAL output; indexOf-by-reference must still
+	// report the correct winner the judge picked (not the first identical match).
+	const def: Taskflow = {
+		name: "identical",
+		phases: [{ id: "p", type: "tournament", agent: "a", judgeAgent: "judge", task: "t", variants: 3, final: true }],
+	};
+	const runTask = runnerFrom((_t, agent) => (agent === "judge" ? { output: "WINNER: 3" } : { output: "DUPLICATE" }));
+	const res = await executeTaskflow(mkState(def), baseDeps(runTask));
+	assert.equal(res.ok, true);
+	assert.equal(res.state.phases.p.tournament?.winner, 3, "winner index must match the judge's pick even with identical outputs");
+});
+
+test("tournament: aborts cleanly on a pre-fired signal (P1-4)", async () => {
+	const def: Taskflow = {
+		name: "abort",
+		phases: [{ id: "p", type: "tournament", agent: "a", judgeAgent: "judge", task: "t", variants: 3, final: true }],
+	};
+	const record: string[] = [];
+	const ac = new AbortController();
+	ac.abort();
+	const runTask = runnerFrom((_t, agent) => (agent === "judge" ? { output: "WINNER: 1" } : { output: "v" }), record);
+	// Should not throw; a pre-aborted run executes no phases and is non-completed.
+	const res = await executeTaskflow(mkState(def), { ...baseDeps(runTask), signal: ac.signal });
+	assert.equal(record.length, 0, "aborted run must not spawn variants");
+	assert.notEqual(res.state.status, "completed");
+});

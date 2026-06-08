@@ -288,6 +288,75 @@ test("runtime: cross-run reuses an identical phase across two runs ($0 hit)", as
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("runtime: cross-run does NOT leak across different flows sharing a phase id (P0-1)", async () => {
+	const dir = tmpDir();
+	const store = new CacheStore(dir);
+	// Two DIFFERENT flows, identical phase id + agent + model + task.
+	const defA: Taskflow = {
+		name: "flow-A",
+		phases: [{ id: "p", type: "agent", agent: "a", task: "same", cache: { scope: "cross-run" }, final: true }],
+	};
+	const defB: Taskflow = {
+		name: "flow-B",
+		phases: [{ id: "p", type: "agent", agent: "a", task: "same", cache: { scope: "cross-run" }, final: true }],
+	};
+	const counter = { n: 0 };
+	const deps: RuntimeDeps = { cwd: dir, agents: AGENTS, runTask: countingRunner(counter), cacheStore: store };
+
+	await executeTaskflow(mkState(defA, dir), deps);
+	await executeTaskflow(mkState(defB, dir), deps);
+	assert.equal(counter.n, 2, "flow-B must NOT reuse flow-A's cache (flow name is part of the key)");
+	// ...but flow-A reusing flow-A still hits
+	await executeTaskflow(mkState(defA, dir), deps);
+	assert.equal(counter.n, 2, "same flow still hits");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("runtime: cross-run misses when phase 'thinking' changes (P0-2)", async () => {
+	const dir = tmpDir();
+	const store = new CacheStore(dir);
+	const mk = (thinking?: string): Taskflow => ({
+		name: "think-cr",
+		phases: [{ id: "p", type: "agent", agent: "a", task: "go", thinking, cache: { scope: "cross-run" }, final: true }],
+	});
+	const counter = { n: 0 };
+	const deps: RuntimeDeps = { cwd: dir, agents: AGENTS, runTask: countingRunner(counter), cacheStore: store };
+
+	await executeTaskflow(mkState(mk("off"), dir), deps);
+	await executeTaskflow(mkState(mk("high"), dir), deps);
+	assert.equal(counter.n, 2, "changing thinking must invalidate the cross-run hit");
+	// same thinking again → hit
+	await executeTaskflow(mkState(mk("off"), dir), deps);
+	assert.equal(counter.n, 2, "identical thinking re-hits");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("runtime: cross-run misses when phase 'tools' change (P0-2)", async () => {
+	const dir = tmpDir();
+	const store = new CacheStore(dir);
+	const mk = (tools: string[]): Taskflow => ({
+		name: "tools-cr",
+		phases: [{ id: "p", type: "agent", agent: "a", task: "go", tools, cache: { scope: "cross-run" }, final: true }],
+	});
+	const counter = { n: 0 };
+	const deps: RuntimeDeps = { cwd: dir, agents: AGENTS, runTask: countingRunner(counter), cacheStore: store };
+
+	await executeTaskflow(mkState(mk(["read"]), dir), deps);
+	await executeTaskflow(mkState(mk(["read", "bash"]), dir), deps);
+	assert.equal(counter.n, 2, "changing tools must invalidate the cross-run hit");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("CacheStore: LRU + max-age eviction (P1-5)", () => {
+	const dir = tmpDir();
+	const store = new CacheStore(dir);
+	// An entry far past the 90-day hard cap is evicted on read even with no TTL.
+	const ancient = Date.now() - 200 * 86_400_000;
+	store.put({ key: "a1a1a1a1", createdAt: ancient, output: "old" });
+	assert.equal(store.get("a1a1a1a1"), null, "entries past the hard max age must not be served");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("runtime: cross-run miss when fingerprinted file changes", async () => {
 	const dir = tmpDir();
 	const f = path.join(dir, "dep.txt");

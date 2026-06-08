@@ -7,7 +7,7 @@
   <a href="https://www.npmjs.com/package/pi-taskflow"><img src="https://img.shields.io/npm/dm/pi-taskflow?style=flat-square&color=6E8BFF&label=downloads" alt="npm downloads"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-43D9AD?style=flat-square" alt="MIT license"></a>
   <a href="#whats-inside"><img src="https://img.shields.io/badge/runtime%20deps-0-43D9AD?style=flat-square" alt="zero runtime dependencies"></a>
-  <a href="#whats-inside"><img src="https://img.shields.io/badge/tests-269-6E8BFF?style=flat-square" alt="269 tests"></a>
+  <a href="#whats-inside"><img src="https://img.shields.io/badge/tests-319-6E8BFF?style=flat-square" alt="319 tests"></a>
   <a href="https://pi.dev"><img src="https://img.shields.io/badge/for-Pi%20coding%20agent-B692FF?style=flat-square" alt="for the Pi coding agent"></a>
 </p>
 
@@ -278,9 +278,9 @@ Some work is inherently iterative — refine a draft until a reviewer is satisfi
 }
 ```
 
-- **Body locals** — the task can read `{loop.iteration}` (1-based) and `{loop.lastOutput}` (the prior iteration's output) to build on its own previous work.
+- **Body locals** — the task can read `{loop.iteration}` (1-based), `{loop.lastOutput}` (the prior iteration's output), and `{loop.maxIterations}` to build on its own previous work; all three are also available to the `until` condition.
 - **`until`** — evaluated after each iteration with the iteration's output exposed as `{steps.<thisId>.output}` / `.json`. Same operators as `when`. The loop stops the moment it's truthy.
-- **Always terminates.** Three independent stops: `until` truthy, **convergence** (a fixed point — output identical to the previous iteration), or **`maxIterations`** (hard-capped at 100). A malformed `until` **stops** the loop rather than spinning forever (fail-safe), and a failing iteration fails the phase with the partial output preserved.
+- **Always terminates.** Four independent stops: `until` truthy, **convergence** (a fixed point — output identical to the previous iteration), **`maxIterations`** (hard-capped at 100), or a **failing iteration** (the phase fails with the partial output preserved). A malformed `until` **stops** the loop rather than spinning forever (fail-safe) and surfaces a warning on the phase.
 - The TUI shows `↻N` with the stop reason (`done` / `converged` / `max` / `failed`); usage is summed across iterations. Like `gate`/`approval`, `loop` is **excluded from `cross-run` cache** (each run must iterate fresh).
 
 ### Tournament (`tournament`)
@@ -536,12 +536,12 @@ Copy one into `.pi/taskflows/<name>.json` (or `~/.pi/agent/taskflows/`) and it r
 
 <div align="center">
 
-**0 runtime dependencies** · **269 tests** · **7 phase types** · **cross-session resume** · **~4.4k LOC runtime**
+**0 runtime dependencies** · **319 tests** · **10 phase types** · **cross-session resume** · **cross-run memoization** · **~4.9k LOC runtime**
 
 </div>
 
 - **Zero runtime dependencies.** No `dependencies` field — the runtime is built entirely on Node built-ins (`fs` / `path` / `os` / `child_process` / `crypto`). The file lock is `fs.openSync("wx")`, not a third-party library.
-- **269 tests across 11 suites** covering concurrency, atomic file locking (8-process race regressions), path-traversal hardening, cross-session resume, gate verdicts, budget caps, retry/backoff, approval flows, sub-flow composition, callback isolation, and the idle watchdog — plus a live end-to-end test that spawns real subagents.
+- **319 tests across 14 suites** covering concurrency, atomic file locking (8-process race regressions), path-traversal hardening, cross-session resume, cross-run cache freshness (flow/thinking/tools key isolation, fingerprint invalidation, TTL/LRU eviction), gate verdicts, budget caps, retry/backoff, approval flows, loop termination, tournament judging, sub-flow composition, callback isolation, and the idle watchdog — plus a live end-to-end test that spawns real subagents and a cross-run cache dogfood.
 - **Hardened by design.** Path-traversal defense (lexical + `realpath`), runId validation, HTML/error sanitization, atomic writes, stale-lock stealing via `rename`, and an idle watchdog that kills wedged subagents.
 - **Dogfooded.** Every new feature has to survive the project's own `self-improve` taskflow before it ships.
 

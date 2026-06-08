@@ -220,6 +220,11 @@ test("loop: a malformed `until` condition stops instead of spinning", async () =
 
 	assert.equal(res.ok, true);
 	assert.equal(record.length, 1, "fail-safe: a broken condition must not loop forever");
+	// P0-3: the swallowed condition error must surface as a warning, not vanish.
+	assert.ok(
+		(res.state.phases.p.warnings ?? []).some((w) => /until.*could not be evaluated/i.test(w)),
+		`expected a malformed-condition warning, got ${JSON.stringify(res.state.phases.p.warnings)}`,
+	);
 });
 
 test("loop: a failing iteration fails the phase with partial output", async () => {
@@ -273,4 +278,34 @@ test("loop: usage is summed across iterations", async () => {
 	// 3 iterations × cost 0.001 each
 	assert.ok((res.state.phases.p.usage?.cost ?? 0) > 0.0029);
 	assert.equal(res.state.phases.p.usage?.turns, 3);
+});
+
+test("loop: convergence:false keeps iterating on identical output up to the cap (P2-2)", async () => {
+	const def: Taskflow = {
+		name: "noconv",
+		phases: [
+			{ id: "p", type: "loop", agent: "a", task: "x", until: "1==2", maxIterations: 4, convergence: false, final: true },
+		],
+	};
+	const record: string[] = [];
+	const runTask = runnerFrom(() => "SAME", record); // identical output every time
+	const res = await executeTaskflow(mkState(def), baseDeps(runTask));
+	assert.equal(res.ok, true);
+	assert.equal(record.length, 4, "with convergence disabled, identical output does NOT short-circuit");
+	assert.equal(res.state.phases.p.loop?.stop, "maxIterations");
+});
+
+test("loop: aborts cleanly on a pre-fired signal (P1-4)", async () => {
+	const def: Taskflow = {
+		name: "abort",
+		phases: [{ id: "p", type: "loop", agent: "a", task: "go {loop.iteration}", until: "1==2", maxIterations: 10, final: true }],
+	};
+	const record: string[] = [];
+	const ac = new AbortController();
+	ac.abort(); // already aborted before the loop starts
+	const runTask = runnerFrom((t) => t, record);
+	const res = await executeTaskflow(mkState(def), { ...baseDeps(runTask), signal: ac.signal });
+	// A pre-aborted run executes nothing and terminates without spinning.
+	assert.equal(record.length, 0, "aborted run must not invoke the subagent at all");
+	assert.notEqual(res.state.status, "completed");
 });

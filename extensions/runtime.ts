@@ -311,6 +311,8 @@ async function executePhase(
 		phaseId: phase.id,
 		flowName: state.flowName,
 		runId: state.runId,
+		thinking: phase.thinking,
+		tools: phase.tools,
 	};
 
 	const baseRun = (agentName: string, task: string, onLive?: (l: LiveUpdate) => void) =>
@@ -655,6 +657,7 @@ async function executePhase(
 		const convergence = phase.convergence ?? true;
 
 		const usages: UsageStats[] = [];
+		const loopWarnings: string[] = [];
 		let lastOutput = "";
 		let prevOutput: string | undefined;
 		let iterations = 0;
@@ -690,8 +693,10 @@ async function executePhase(
 			});
 			untilCtx.steps[phase.id] = { output: lastOutput, json: safeParse(lastOutput) };
 			const { value: done, error: condErr } = tryEvaluateCondition(phase.until ?? "", untilCtx);
-			// A malformed condition must not spin forever: stop and surface a warning.
+			// A malformed condition must not spin forever: stop and surface a warning
+			// so the author learns the `until` never actually evaluated.
 			if (condErr) {
+				loopWarnings.push(`loop 'until' could not be evaluated (stopped early): ${condErr}`);
 				stop = "until";
 				break;
 			}
@@ -715,6 +720,7 @@ async function executePhase(
 				usage: aggUsage,
 				error: failedResult.errorMessage || failedResult.stderr || `loop '${phase.id}' iteration ${iterations} failed`,
 				loop: { iterations, stop: "failed" },
+				warnings: loopWarnings.length ? loopWarnings : undefined,
 				inputHash: hashInput(phase.id, "loop", phase.until ?? ""),
 				endedAt: Date.now(),
 			};
@@ -726,6 +732,7 @@ async function executePhase(
 			json: parseJson ? safeParse(lastOutput) : undefined,
 			usage: aggUsage,
 			loop: { iterations, stop },
+			warnings: loopWarnings.length ? loopWarnings : undefined,
 			inputHash: hashInput(phase.id, "loop", phase.until ?? "", String(iterations)),
 			endedAt: Date.now(),
 		};
@@ -753,6 +760,10 @@ async function executePhase(
 		const ran = results.filter((r) => r.stopReason !== "budget-skipped");
 		const ok = ran.filter((r) => !isFailed(r));
 		const variantUsage = aggregateUsage(results.map((r) => r.usage));
+		// Winner numbers are 1-based over `ran` (exactly what the judge is shown).
+		// Using indexOf on the stable `ran` array is reference-based and correct even
+		// when two variants produce byte-identical output.
+		const ranIdx = (r: RunResult) => ran.indexOf(r) + 1;
 
 		// All competitors failed → the tournament fails (nothing to judge).
 		if (ok.length === 0) {
@@ -768,7 +779,6 @@ async function executePhase(
 		}
 		// Only one competitor survived → no contest; it wins by default (skip judge).
 		if (ok.length === 1) {
-			const onlyIdx = results.indexOf(ok[0]) + 1;
 			return {
 				id: phase.id,
 				status: "done",
@@ -776,7 +786,7 @@ async function executePhase(
 				json: parseJson ? safeParse(ok[0].output) : undefined,
 				usage: variantUsage,
 				model: ok[0].model,
-				tournament: { variants: competitors.length, winner: onlyIdx, mode, reason: "only surviving variant" },
+				tournament: { variants: competitors.length, winner: ranIdx(ok[0]), mode, reason: "only surviving variant" },
 				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
 				endedAt: Date.now(),
 			};
@@ -799,7 +809,8 @@ async function executePhase(
 		const judgeUsage = aggregateUsage([variantUsage, judgeRes.usage]);
 
 		if (isFailed(judgeRes)) {
-			// Judge failed: fall back to variant 1 (fail-open, never lose the work).
+			// Judge failed: fall back to the first eligible variant (fail-open, never
+			// lose the work). Report the variant we actually used, not a hardcoded 1.
 			return {
 				id: phase.id,
 				status: "done",
@@ -807,8 +818,8 @@ async function executePhase(
 				json: parseJson ? safeParse(ok[0].output) : undefined,
 				usage: judgeUsage,
 				model: ok[0].model,
-				warnings: [`judge failed (${judgeRes.errorMessage ?? "error"}); defaulted to variant 1`],
-				tournament: { variants: competitors.length, winner: results.indexOf(ok[0]) + 1, mode, reason: "judge failed" },
+				warnings: [`judge failed (${judgeRes.errorMessage ?? "error"}); used variant ${ranIdx(ok[0])}`],
+				tournament: { variants: competitors.length, winner: ranIdx(ok[0]), mode, reason: "judge failed" },
 				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
 				endedAt: Date.now(),
 			};
@@ -820,7 +831,7 @@ async function executePhase(
 		// In 'best' mode the output is the winning variant verbatim; in 'aggregate'
 		// mode it is the judge's synthesized answer.
 		const chosen = winnerIneligible ? ok[0] : winnerResult;
-		const winnerIdx = results.indexOf(chosen) + 1;
+		const winnerIdx = ranIdx(chosen);
 		const output = mode === "aggregate" ? judgeRes.output : chosen.output;
 		return {
 			id: phase.id,
@@ -886,11 +897,21 @@ interface PhaseCacheCtx {
 	phaseId: string;
 	flowName: string;
 	runId: string;
+	/** Per-phase execution config that materially affects subagent output and
+	 *  therefore must be part of the cache identity (else a config change could
+	 *  silently serve a stale cross-run hit). */
+	thinking?: string;
+	tools?: string[];
 }
 
 /** Fold the phase fingerprint into the base hash parts to form the final cache key. */
 function cacheKey(cc: PhaseCacheCtx, baseParts: string[]): string {
-	return cc.fingerprint ? hashInput(...baseParts, cc.fingerprint) : hashInput(...baseParts);
+	// Fold the full cache identity into the hash: flow name (prevents collisions
+	// across different flows that share a phase.id + task + model), the per-phase
+	// thinking/tools config (changing either changes the subagent's output), and
+	// the resolved world-state fingerprint.
+	const parts = [`flow:${cc.flowName}`, ...baseParts, `think:${cc.thinking ?? ""}`, `tools:${JSON.stringify(cc.tools ?? [])}`];
+	return cc.fingerprint ? hashInput(...parts, cc.fingerprint) : hashInput(...parts);
 }
 
 /**

@@ -38,6 +38,10 @@ function resolveOne(entry: string, cwd: string): string {
 	try {
 		if (entry === "git:HEAD" || entry.startsWith("git:")) {
 			const ref = entry.slice("git:".length) || "HEAD";
+			// Reject refs that could be interpreted as git options (e.g. "--exec=...").
+			// The ref comes from a taskflow definition; refuse flag-like values so a
+			// crafted definition can't smuggle arguments into git.
+			if (ref.startsWith("-")) return `git:${ref}=<invalid-ref>`;
 			try {
 				const sha = execFileSync("git", ["rev-parse", ref], {
 					cwd,
