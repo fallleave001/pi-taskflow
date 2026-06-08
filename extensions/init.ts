@@ -497,9 +497,19 @@ async function pickOneRole(
 		return full;
 	}
 	if (pick === "Keep current") return undefined;
-	// Parse model from display label: "Name (provider/id) · tags..."
-	const match = pick.match(/\(([^)]+)\)/);
-	return match ? match[1] : pick;
+	return parseModelFromLabel(pick);
+}
+
+/**
+ * Recover the `provider/id` from a picker label like "Name (provider/id) · tags".
+ * Greedy `.*` anchors to the LAST parenthesized group and the `/` requirement
+ * ensures we capture the provider/id — not a parenthesized part of the model's
+ * display name (e.g. "GPT-4o (2024-08-06) (openai/gpt-4o-2024-08-06)"). Falls
+ * back to the raw label when no provider/id group is present.
+ */
+export function parseModelFromLabel(label: string): string {
+	const match = label.match(/.*\(([^)]+\/[^)]+)\)/);
+	return match ? match[1] : label;
 }
 
 /** Check if two role maps are semantically identical. */

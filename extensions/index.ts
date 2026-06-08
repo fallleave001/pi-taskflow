@@ -626,7 +626,7 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
-				const currentRoles = settings.modelRoles as Record<string, string>;
+				const currentRoles = (settings.modelRoles ?? {}) as Record<string, string>;
 
 				if (!ctx.hasUI) {
 					if (Object.keys(currentRoles).length > 0) {

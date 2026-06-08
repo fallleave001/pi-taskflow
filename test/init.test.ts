@@ -15,6 +15,7 @@ import {
 	readSettings,
 	writeSettings,
 	formatModelOption,
+	parseModelFromLabel,
 	buildRoleOptions,
 	parseCustomModel,
 	modelExists,
@@ -158,6 +159,20 @@ test("formatModelOption: includes name + provider/id", () => {
 	const result = formatModelOption(m);
 	assert.ok(result.includes("DeepSeek V4 Flash"), "should include name");
 	assert.ok(result.includes("openrouter/deepseek/v4-flash"), "should include provider/id");
+});
+
+test("parseModelFromLabel: recovers provider/id from a simple label", () => {
+	assert.equal(parseModelFromLabel("DeepSeek V4 Flash (openrouter/deepseek/v4-flash) tags"), "openrouter/deepseek/v4-flash");
+});
+
+test("parseModelFromLabel: model name with parens does NOT shadow provider/id (F1 regression)", () => {
+	const label = formatModelOption(mockModel("openai", "gpt-4o-2024-08-06", "GPT-4o (2024-08-06)"));
+	assert.equal(parseModelFromLabel(label), "openai/gpt-4o-2024-08-06");
+});
+
+test("parseModelFromLabel: falls back to the raw label with no provider/id group", () => {
+	assert.equal(parseModelFromLabel("just-a-bare-string"), "just-a-bare-string");
+	assert.equal(parseModelFromLabel("Name (no-slash-here)"), "Name (no-slash-here)");
 });
 
 test("formatModelOption: adds reasoning tag when model.reasoning is true", () => {
@@ -392,6 +407,19 @@ test("readSettings: modelRoles: null returns {} for modelRoles", () => {
 	);
 	const result = readSettings();
 	assert.deepEqual(result.modelRoles, {});
+});
+
+test("readSettings: a settings file WITHOUT a modelRoles key leaves it undefined (F5 context)", () => {
+	// readSettings only normalizes modelRoles when the key is present, so callers
+	// MUST default it (the F5 `?? {}` fix). A foreign settings.json (written by
+	// another extension) has no modelRoles at all.
+	const sp = getSettingsPath();
+	fs.writeFileSync(sp, JSON.stringify({ theme: "dark", someOtherKey: 1 }), "utf-8");
+	const result = readSettings();
+	assert.equal(result.modelRoles, undefined, "missing key stays undefined");
+	const roles = (result.modelRoles ?? {}) as Record<string, string>;
+	assert.doesNotThrow(() => Object.keys(roles));
+	assert.equal(Object.keys(roles).length, 0);
 });
 
 test("readSettings/writeSettings: round-trip preserves non-modelRoles keys", () => {
