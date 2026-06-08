@@ -31,6 +31,10 @@
     "skills",
     "examples",
     "README.md",
+    "README.zh-CN.md",
+    "README.hi.md",
+    "README.es.md",
+    "README.ar.md",
     "DESIGN.md",
     "LICENSE"
   ],

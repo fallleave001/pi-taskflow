@@ -13,6 +13,14 @@
   <a href="https://pi.dev"><img src="https://img.shields.io/badge/for-Pi%20coding%20agent-B692FF?style=flat-square" alt="for the Pi coding agent"></a>
 </p>
 
+<p align="center">
+  <a href="./README.md">English</a> ·
+  <a href="./README.zh-CN.md">简体中文</a> ·
+  <a href="./README.hi.md">हिन्दी</a> ·
+  <a href="./README.es.md">Español</a> ·
+  <a href="./README.ar.md">العربية</a>
+</p>
+
 <p><strong>Declarative DAG orchestration for <a href="https://pi.dev">Pi</a> subagents.</strong><br/>
 Fan out · gate · resume · save as a command — intermediate results stay out of your context.</p>
 
