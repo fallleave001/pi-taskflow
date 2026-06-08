@@ -206,6 +206,19 @@ const PhaseSchema = Type.Object(
 				default: 8000,
 			}),
 		),
+		onBlock: Type.Optional(
+			StringEnum(["halt", "retry"] as const, {
+				description:
+					"[gate] What to do when the gate blocks: 'halt' (default, stop the flow) or 'retry' (re-run upstream phases then re-evaluate the gate). Limited by 'retry.max'.",
+				default: "halt",
+			}),
+		),
+		eval: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"[gate] Zero-token machine checks that run BEFORE the LLM gate. If ALL pass, the gate is skipped (PASS). If ANY fail, the LLM gate runs as normal. Each entry is a condition expression like '{steps.x.output} contains PASS' or '{steps.x.json.score} >= 0.8'. Supports same operators as 'when' plus 'contains' for substring checks.",
+			}),
+		),
 		cache: Type.Optional(CacheSchema),
 	},
 	{ additionalProperties: false },

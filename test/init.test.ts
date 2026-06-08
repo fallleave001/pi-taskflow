@@ -434,6 +434,80 @@ test("readSettings/writeSettings: round-trip preserves non-modelRoles keys", () 
 	assert.deepEqual(result.enabledModels, ["a/b", "c/d"]);
 });
 
+test("writeSettings: merge preserves on-disk keys NOT in incoming (the F5 clobber guard)", () => {
+	// Simulate reality: a real settings.json with packages, subagents, etc.
+	const diskSnapshot = {
+		defaultProvider: "anthropic",
+		defaultModel: "claude-opus-4-8-thinking-xhigh",
+		hideThinkingBlock: true,
+		quietStartup: true,
+		packages: ["npm:pi-crew", "npm:pi-mcp-adapter"],
+		subagents: { agentOverrides: { planner: { model: "gpt-5.5" } } },
+		enabledModels: ["deepseek-v4-flash"],
+		warnings: { anthropicExtraUsage: false },
+	};
+	// Pre-populate the disk file with all these keys
+	const sp = getSettingsPath();
+	fs.writeFileSync(sp, JSON.stringify(diskSnapshot, null, 2), "utf-8");
+
+	// Now simulate what /tf init writes — only modelRoles
+	writeSettings({ modelRoles: { fast: "test/fast" } });
+
+	const result = readSettings();
+	// modelRoles was set
+	assert.deepEqual(result.modelRoles, { fast: "test/fast" });
+	// All other keys survived
+	assert.equal(result.defaultProvider, "anthropic");
+	assert.equal(result.defaultModel, "claude-opus-4-8-thinking-xhigh");
+	assert.equal(result.hideThinkingBlock, true);
+	assert.equal(result.quietStartup, true);
+	assert.deepEqual(result.packages, ["npm:pi-crew", "npm:pi-mcp-adapter"]);
+	assert.deepEqual(result.subagents, { agentOverrides: { planner: { model: "gpt-5.5" } } });
+	assert.deepEqual(result.enabledModels, ["deepseek-v4-flash"]);
+	assert.deepEqual(result.warnings, { anthropicExtraUsage: false });
+});
+
+test("writeSettings: creates .bak-tf-* backup for files with > 3 top-level keys", () => {
+	const sp = getSettingsPath();
+	// Enough keys to trigger backup threshold (> 3)
+	fs.writeFileSync(sp, JSON.stringify({
+		a: 1, b: 2, c: 3, d: 4,
+	}), "utf-8");
+
+	// Clean up any leftover .bak-tf-* files from previous runs
+	const dir = path.dirname(sp);
+	for (const f of fs.readdirSync(dir)) {
+		if (f.startsWith("settings.json.bak-tf-")) fs.unlinkSync(path.join(dir, f));
+	}
+
+	writeSettings({ modelRoles: { fast: "test" } });
+
+	// Verify backup was created
+	const files = fs.readdirSync(dir);
+	const backups = files.filter((f) => f.startsWith("settings.json.bak-tf-"));
+	assert.equal(backups.length, 1, `expected 1 backup, got ${backups.length}: ${backups.join(", ")}`);
+
+	// Clean up
+	fs.unlinkSync(path.join(dir, backups[0]));
+});
+
+test("writeSettings: does NOT create backup for tiny files (≤ 3 keys)", () => {
+	const sp = getSettingsPath();
+	fs.writeFileSync(sp, JSON.stringify({ a: 1 }), "utf-8");
+
+	const dir = path.dirname(sp);
+	// Clean up any leftover .bak-tf-* files
+	for (const f of fs.readdirSync(dir)) {
+		if (f.startsWith("settings.json.bak-tf-")) fs.unlinkSync(path.join(dir, f));
+	}
+
+	writeSettings({ modelRoles: { fast: "test" } });
+
+	const files = fs.readdirSync(dir);
+	const backups = files.filter((f) => f.startsWith("settings.json.bak-tf-"));
+	assert.equal(backups.length, 0, `expected 0 backups, got ${backups.length}`);
+});
+
 test("writeSettings: atomic write uses unique tmp and cleans up", () => {
 	// writeSettings should succeed and produce a valid JSON file
 	writeSettings({ modelRoles: { fast: "test" } });

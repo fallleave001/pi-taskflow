@@ -7,3 +7,10 @@ dist/
 
 # Lockfile omitted: generated against internal mirror locally; CI installs from public npm
 package-lock.json
+
+/.crew/
+/.crew
+!.crew/artifacts/
+!.crew/graphs/
+!.crew/artifacts/.gitkeep
+!.crew/graphs/.gitkeep

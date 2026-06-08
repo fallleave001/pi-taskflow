@@ -60,7 +60,7 @@ const ShorthandStep = Type.Object(
 );
 
 const TaskflowParams = Type.Object({
-	action: StringEnum(["run", "save", "resume", "list", "agents", "init", "cache-clear"] as const, {
+	action: StringEnum(["run", "save", "resume", "list", "agents", "init", "verify", "cache-clear"] as const, {
 		description: "What to do: run a flow, save a definition, resume a paused run, list saved flows, list available agents, init model role configuration, or clear the cross-run memoization cache",
 		default: "run",
 	}),
@@ -392,6 +392,53 @@ export default function (pi: ExtensionAPI) {
 					? flows.map((f) => `- ${f.name} (${f.scope}): ${f.def.description ?? ""}`).join("\n")
 					: "No saved taskflows.";
 				return { content: [{ type: "text", text }], details: { action } satisfies TaskflowDetails };
+			}
+
+			if (action === "verify") {
+				const { verifyTaskflow } = await import("./verify.ts");
+				// Load definition: inline define takes priority, then saved name
+				let def: Taskflow | undefined;
+				if (params.define) {
+					const d = params.define as Record<string, unknown>;
+					if (typeof d === "object" && d !== null && Array.isArray(d.phases)) {
+						def = d as unknown as Taskflow;
+					} else if (isShorthand(params.define)) {
+						const r = validateTaskflow(params.define);
+						if (r.ok) def = params.define as unknown as Taskflow;
+					}
+				} else if (params.name) {
+					const saved = getFlow(ctx.cwd, params.name);
+					if (saved) def = saved.def;
+				}
+				if (!def) {
+					return errorResult(action, "Provide 'define' (DSL) or 'name' (saved flow) to verify.");
+				}
+				// Schema validation first
+				const vr = validateTaskflow(def, { cwd: ctx.cwd ? String(ctx.cwd) : undefined });
+				if (!vr.ok) {
+					return errorResult(action, `Schema validation failed:\n${vr.errors.join("\n")}`);
+				}
+				const result = verifyTaskflow({ name: def.name!, phases: def.phases!, budget: def.budget, concurrency: def.concurrency });
+				const lines: string[] = [];
+				lines.push(`# Verification of "${def.name}"`);
+				lines.push("");
+				if (result.issues.length === 0) {
+					lines.push("✅ No issues found.");
+				} else {
+					const errors = result.issues.filter((i) => i.severity === "error");
+					const warnings = result.issues.filter((i) => i.severity === "warning");
+					if (errors.length) {
+						lines.push(`## Errors (${errors.length})`);
+						for (const e of errors) lines.push(`- **${e.category}**${e.phaseId ? ` [${e.phaseId}]` : ""}: ${e.message}`);
+					}
+					if (warnings.length) {
+						lines.push(`## Warnings (${warnings.length})`);
+						for (const w of warnings) lines.push(`- ${w.category}${w.phaseId ? ` [${w.phaseId}]` : ""}: ${w.message}`);
+					}
+					lines.push("");
+					lines.push(result.ok ? "Status: PASS (no errors)" : "Status: FAIL (errors found)");
+				}
+				return { content: [{ type: "text", text: lines.join("\n") }], details: { action } satisfies TaskflowDetails };
 			}
 
 			if (action === "cache-clear") {

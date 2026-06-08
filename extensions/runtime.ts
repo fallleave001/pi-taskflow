@@ -454,6 +454,47 @@ async function executePhase(
 	// interpolated task. gate additionally parses a verdict; reduce simply pulls
 	// its inputs from `from` phases (already exposed via interpolation).
 	if (type === "agent" || type === "gate" || type === "reduce") {
+		// Eval gate: zero-token machine checks before the LLM gate.
+		if (type === "gate" && Array.isArray(phase.eval) && phase.eval.length > 0) {
+			const evalCtx = buildInterpolationContext(state, previousOutput);
+			let allPassed = true;
+			for (const check of phase.eval) {
+				let expr = check;
+				// Pre-process `contains` expressions: "{steps.x.output} contains PASS"
+				// Convert to: interpolate LHS, check RHS substring inclusion.
+				const containsIdx = expr.indexOf(" contains ");
+				if (containsIdx > 0) {
+					const lhs = expr.slice(0, containsIdx).trim();
+					const rhs = expr.slice(containsIdx + " contains ".length).trim();
+					const lhsVal = interpolate(lhs, evalCtx);
+					const lhsStr = lhsVal.text;
+					if (!lhsStr.includes(rhs)) {
+						allPassed = false;
+						break;
+					}
+					continue;
+				}
+				if (!evaluateCondition(expr, evalCtx)) {
+					allPassed = false;
+					break;
+				}
+			}
+			if (allPassed) {
+				// All evals passed — skip the LLM gate, return an auto-pass.
+				const inputHash = cacheKey(cc, [phase.id, "eval-skip"]);
+				const ps: PhaseState = {
+					id: phase.id,
+					status: "done",
+					output: "PASS (eval checks passed — no LLM call)",
+					gate: { verdict: "pass" },
+					usage: emptyUsage(),
+					inputHash,
+					endedAt: Date.now(),
+				};
+				recordCache(cc, ps);
+				return ps;
+			}
+		}
 		const { text } = interpolate(phase.task ?? "", ctx);
 		const fullTask = preRead + text;
 		const agentName = resolveAgent(phase.agent, deps, state);
@@ -464,6 +505,33 @@ async function executePhase(
 		const r = await runOne(agentName, fullTask, liveSink(state, phase.id, emitProgress));
 		const ps = resultToPhaseState(phase.id, r, inputHash, parseJson);
 		if (type === "gate" && ps.status === "done") ps.gate = parseGateVerdict(r.output);
+
+		// onBlock:retry — re-execute upstream + gate until pass or max attempts.
+		if (type === "gate" && ps.gate?.verdict === "block") {
+			const onBlockV: string = (phase as any).onBlock ?? "halt";
+			let attempt = 0;
+			let gatePs = ps;
+			while (onBlockV === "retry" && attempt < (phase.retry?.max ?? 1)) {
+				attempt++;
+				for (const depId of phase.dependsOn ?? []) {
+					const d = new Map((state.def.phases as any[]).map((p: any) => [p.id, p])).get(depId);
+					if (!d) continue;
+					const dPs = await executePhase(d, state, deps, prior, emitProgress);
+					state.phases[depId] = dPs;
+				}
+				const retryCtx = buildInterpolationContext(state, lastCompletedOutput(state, phase));
+				const retryText = interpolate(phase.task ?? "", retryCtx).text;
+				const retryTask = preRead + retryText;
+				const retryIH = cacheKey(cc, [phase.id, agentName, phase.model ?? "", retryTask]);
+				const retryR = await runOne(agentName, retryTask, liveSink(state, phase.id, emitProgress));
+				gatePs = resultToPhaseState(phase.id, retryR, retryIH, parseJson);
+				if (gatePs.status === "done") gatePs.gate = parseGateVerdict(retryR.output);
+				if (gatePs.gate?.verdict !== "block") break;
+			}
+			gatePs.attempts = (ps.attempts ?? 0) + attempt;
+			recordCache(cc, gatePs);
+			return gatePs;
+		}
 		recordCache(cc, ps);
 		return ps;
 	}
