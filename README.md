@@ -90,6 +90,10 @@ The Pi ecosystem has a healthy crowd of delegation and orchestration extensions 
 pi install npm:pi-taskflow
 ```
 
+> **Optional:** run `/tf init` once to map the 18 built-in agents' model roles
+> (`fast`, `strong`, `thinker`, …) to your own models — an interactive picker.
+> Skip it and agents just use Pi's default model. See [Model roles](#model-roles).
+
 **2. Run** — just ask the model in a Pi session:
 
 > *Run a chain: first explore the auth flow, then summarize the findings.*
@@ -291,7 +295,7 @@ Saved flows become CLI shortcuts. All commands run in the Pi session:
 | `/tf show <name>` | Print a flow's definition |
 | `/tf runs` | Browse recent run history (interactive TUI) |
 | `/tf resume <runId>` | Continue a paused/failed run — cached phases skip automatically |
-| `/tf init` | Generate default modelRoles config in `~/.pi/agent/settings.json` |
+| `/tf init` | **Interactively map model roles** to your enabled models (writes `~/.pi/agent/settings.json`) |
 | `/tf:<name> [args]` | Shortcut — runs the flow in one tap |
 
 Tool actions (used by the model): `run` (inline `define` or saved `name`), `save`, `resume`, `list`.
@@ -366,14 +370,31 @@ Each built-in agent's `model` field uses a **role placeholder** (e.g. `{{fast}}`
 | `{{vision}}` | Multimodal — UI work, design reading | MiniMax M3 |
 | `{{reasoner}}` | Cautious reasoning — security, risk | GLM 5.1 |
 
-Without configuration, agents fall back to Pi's default model. To assign specific models:
+Without configuration, agents fall back to Pi's default model. To map roles to real models, run the interactive setup:
 
 ```bash
-# Auto-generate ~/.pi/agent/settings.json with default role mappings
 /tf init
 ```
 
-This writes:
+`/tf init` is a guided, step-by-step picker. For **each role**, it shows your
+enabled models — the exact same scoped list as Pi's `/model` command — and you
+choose one (or type a custom identifier):
+
+```
+Model for 'fast' — Cheap & quick (executor, scout, recover, verifier, ...)
+
+  ❯ openrouter/deepseek/deepseek-v4-flash
+    openrouter/deepseek/deepseek-v4-pro
+    anthropic/claude-sonnet-4-6
+    z-ai/glm-5.1
+    ...
+    ───────────────
+    Custom (type your own)
+```
+
+Re-running `/tf init` shows your current pick as `(current)` for each role, so
+you can revise the mapping any time. Your choices are written to
+`~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -388,7 +409,7 @@ This writes:
 }
 ```
 
-Edit the values to match your available providers. You can also override individual agents via `subagents.agentOverrides` in the same file:
+Edit the values manually any time, or just re-run `/tf init`. You can also override individual agents via `subagents.agentOverrides` in the same file:
 
 ```json
 {
