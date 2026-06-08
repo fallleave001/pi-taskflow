@@ -117,9 +117,45 @@ export function readSettings(): Record<string, unknown> {
 	return raw as Record<string, unknown>;
 }
 
-export function writeSettings(settings: Record<string, unknown>): string {
+/**
+ * Write settings safely.
+ *
+ * Strategy: read current on-disk state, merge our changes on top, then
+ * write atomically.  This preserves keys written by pi's own SettingsManager
+ * flusher between our read and write (last-write-wins, but we don't clobber
+ * unrelated keys).  Additionally creates a timestamped backup before any
+ * write to a non-trivial settings file as a belt-and-suspenders safeguard.
+ */
+export function writeSettings(incoming: Record<string, unknown>): string {
 	const sp = getSettingsPath();
-	writeFileAtomic(sp, JSON.stringify(settings, null, 2) + "\n");
+	let current: Record<string, unknown> = {};
+
+	// 1. Read current on-disk state (so we can merge, not replace)
+	if (fs.existsSync(sp)) {
+		try {
+			const raw: unknown = JSON.parse(fs.readFileSync(sp, "utf-8"));
+			if (isPlainObject(raw)) current = raw;
+		} catch {
+			/* proceed with empty fallback */
+		}
+	}
+
+	// 2. Pre-write backup — only for non-trivial files
+	const existingKeys = Object.keys(current);
+	if (existingKeys.length > 3) {
+		try {
+			const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+			fs.copyFileSync(sp, `${sp}.bak-tf-${stamp}`);
+		} catch {
+			/* backup is best-effort */
+		}
+	}
+
+	// 3. Merge: disk state + our overrides.  This is the key safety property —
+	//    unrelated keys (packages, subagents, UI prefs, etc.) survive even if
+	//    pi's SettingsManager flushed between our read and write.
+	const merged = { ...current, ...incoming };
+	writeFileAtomic(sp, JSON.stringify(merged, null, 2) + "\n");
 	return sp;
 }
 

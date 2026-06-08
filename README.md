@@ -7,7 +7,7 @@
   <a href="https://www.npmjs.com/package/pi-taskflow"><img src="https://img.shields.io/npm/dm/pi-taskflow?style=flat-square&color=6E8BFF&label=downloads" alt="npm downloads"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-43D9AD?style=flat-square" alt="MIT license"></a>
   <a href="#whats-inside"><img src="https://img.shields.io/badge/runtime%20deps-0-43D9AD?style=flat-square" alt="zero runtime dependencies"></a>
-  <a href="#whats-inside"><img src="https://img.shields.io/badge/tests-319-6E8BFF?style=flat-square" alt="319 tests"></a>
+  <a href="#whats-inside"><img src="https://img.shields.io/badge/tests-371-6E8BFF?style=flat-square" alt="371 tests"></a>
   <a href="https://pi.dev"><img src="https://img.shields.io/badge/for-Pi%20coding%20agent-B692FF?style=flat-square" alt="for the Pi coding agent"></a>
 </p>
 
@@ -574,12 +574,12 @@ Copy one into `.pi/taskflows/<name>.json` (or `~/.pi/agent/taskflows/`) and it r
 
 <div align="center">
 
-**0 runtime dependencies** · **319 tests** · **10 phase types** · **cross-session resume** · **cross-run memoization** · **~4.9k LOC runtime**
+**0 runtime dependencies** · **371 tests** · **10 phase types** · **cross-session resume** · **cross-run memoization** · **~4.9k LOC runtime**
 
 </div>
 
 - **Zero runtime dependencies.** No `dependencies` field — the runtime is built entirely on Node built-ins (`fs` / `path` / `os` / `child_process` / `crypto`). The file lock is `fs.openSync("wx")`, not a third-party library.
-- **319 tests across 14 suites** covering concurrency, atomic file locking (8-process race regressions), path-traversal hardening, cross-session resume, cross-run cache freshness (flow/thinking/tools key isolation, fingerprint invalidation, TTL/LRU eviction), gate verdicts, budget caps, retry/backoff, approval flows, loop termination, tournament judging, sub-flow composition, callback isolation, and the idle watchdog — plus a live end-to-end test that spawns real subagents and a cross-run cache dogfood.
+- **371 tests across 14 suites** covering concurrency, atomic file locking (8-process race regressions), path-traversal hardening, cross-session resume, cross-run cache freshness (flow/thinking/tools key isolation, fingerprint invalidation, TTL/LRU eviction), gate verdicts, budget caps, retry/backoff, approval flows, loop termination, tournament judging, sub-flow composition, callback isolation, the idle watchdog, model-role init config, and parseModelFromLabel with parenthesized-model-name regression — plus a live end-to-end test that spawns real subagents and a cross-run cache dogfood.
 - **Hardened by design.** Path-traversal defense (lexical + `realpath`), runId validation, HTML/error sanitization, atomic writes, stale-lock stealing via `rename`, and an idle watchdog that kills wedged subagents.
 - **Dogfooded.** Every new feature has to survive the project's own `self-improve` taskflow before it ships.
 
@@ -587,7 +587,7 @@ If this saves you a context window, **drop a ⭐ on [GitHub](https://github.com/
 
 ## Status & limits
 
-**v0.0.11** — full control-flow & reliability layer (`when` guards, `join: any`, `retry`/backoff, `approval`, `flow` composition, `budget` caps, idle watchdog) on top of the DSL + DAG runtime (`agent`/`parallel`/`map`/`gate`/`reduce`), inline + saved flows, cross-session resume, live progress, and isolated context. A run executes as one streaming tool call.
+**v0.0.13** — loop-until-done (`loop` phase: iterate to a condition, convergence, or cap), tournament (best-of-N with a judge), cross-run memoization (content-addressed cache with git/file/glob/env fingerprints and TTL), interactive `/tf init` with role-aware model pickers + diff preview + atomic merge-write, 18 built-in agents with 6 model roles. Full control-flow & reliability layer (`when` guards, `join: any`, `retry`/backoff, `approval`, `flow` composition, `budget` caps, idle watchdog) on top of the DSL + DAG runtime (`agent`/`parallel`/`map`/`gate`/`reduce`). Inline + saved flows, cross-session resume, live progress, and isolated context. A run executes as one streaming tool call.
 
 Known boundaries (tracked, bounded — no surprises mid-flow):
 
