@@ -13,7 +13,7 @@ function agent(id: string, deps?: string[], overrides?: Partial<Phase>): Phase {
 function gate(id: string, deps?: string[], overrides?: Partial<Phase>): Phase {
 	return { id, type: "gate", task: "gate " + id, dependsOn: deps, ...overrides };
 }
-function vf(phases: Phase[], opts?: { budget?: { maxTokens?: number } }): VerifiableFlow {
+function vf(phases: Phase[], opts?: { budget?: { maxTokens?: number; maxUSD?: number } }): VerifiableFlow {
 	return { name: "test", phases, ...opts };
 }
 
@@ -167,4 +167,33 @@ test("verify: ok=false when any error exists", () => {
 	const r = verifyTaskflow(flow);
 	assert.equal(r.ok, false);
 	assert.ok(r.issues.some((i) => i.severity === "error"));
+});
+
+// ---------------------------------------------------------------------------
+// Budget overflow — maxUSD (M-9)
+// ---------------------------------------------------------------------------
+
+test("verify: budget-overflow — impossible maxUSD", () => {
+	// 3 phases × $0.001 minimum = $0.003, but budget is only $0.001
+	const flow = vf([agent("a"), agent("b"), agent("c")], { budget: { maxUSD: 0.001 } });
+	const r = verifyTaskflow(flow);
+	const bd = r.issues.filter((i) => i.category === "budget-overflow");
+	assert.ok(bd.length >= 1, "should detect maxUSD overflow");
+	assert.ok(bd.some((i) => i.message.includes("maxUSD")), "should mention maxUSD");
+});
+
+test("verify: budget-overflow — ample maxUSD", () => {
+	const flow = vf([agent("a"), agent("b")], { budget: { maxUSD: 1.0 } });
+	const r = verifyTaskflow(flow);
+	const bd = r.issues.filter((i) => i.category === "budget-overflow");
+	assert.equal(bd.length, 0, "ample budget should not trigger overflow");
+});
+
+test("verify: budget-overflow — both maxTokens and maxUSD checked independently", () => {
+	// maxTokens is fine, but maxUSD is too low
+	const flow = vf([agent("a"), agent("b"), agent("c")], { budget: { maxTokens: 1000, maxUSD: 0.001 } });
+	const r = verifyTaskflow(flow);
+	const bd = r.issues.filter((i) => i.category === "budget-overflow");
+	assert.ok(bd.some((i) => i.message.includes("maxUSD")), "should flag maxUSD");
+	assert.ok(!bd.some((i) => i.message.includes("maxTokens")), "should not flag maxTokens");
 });

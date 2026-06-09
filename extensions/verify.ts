@@ -253,12 +253,23 @@ function detectBudgetOverflow(flow: VerifiableFlow): VerificationIssue[] {
 		}
 	}
 
+	const ESTIMATED_COST_PER_PHASE = 0.001; // $0.001 minimum per subagent call
 	if (budget.maxTokens !== undefined && budget.maxTokens > 0 && minTokens > budget.maxTokens) {
 		issues.push({
 			message:
 				`Budget cap (${budget.maxTokens} tokens) is below the estimated minimum of ~${minTokens} tokens ` +
 				`for ${flow.phases.length} phase(s). The flow will likely be truncated before completion. ` +
 				`Increase maxTokens or reduce the number of phases.`,
+			severity: "warning",
+			category: "budget-overflow",
+		});
+	}
+	if (budget.maxUSD !== undefined && budget.maxUSD > 0 && minTokens * ESTIMATED_COST_PER_PHASE > budget.maxUSD) {
+		issues.push({
+			message:
+				`Budget cap ($${budget.maxUSD}) is below the estimated minimum of ~$${(minTokens * ESTIMATED_COST_PER_PHASE).toFixed(3)} ` +
+				`for ${flow.phases.length} phase(s). The flow will likely be truncated before completion. ` +
+				`Increase maxUSD or reduce the number of phases.`,
 			severity: "warning",
 			category: "budget-overflow",
 		});

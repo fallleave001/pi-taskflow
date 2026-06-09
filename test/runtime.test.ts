@@ -170,6 +170,65 @@ test("runtime: failed phase aborts downstream (marked skipped)", async () => {
 	assert.equal(res.state.status, "failed");
 });
 
+test("runtime: failed phase output visible to optional downstream", async () => {
+	// When a phase fails but is marked optional, its error output should be
+	// visible to downstream phases via interpolation (e.g. {steps.one.output}).
+	const def: Taskflow = {
+		name: "fail-visible",
+		phases: [
+			{ id: "one", type: "agent", agent: "a", task: "willfail", optional: true },
+			{ id: "two", type: "agent", agent: "a", task: "review {steps.one.output}", dependsOn: ["one"], final: true },
+		],
+	};
+	const deps = baseDeps(mockRunner((t) => `ok:${t}`, { fail: (t) => t === "willfail" }));
+	const res = await executeTaskflow(mkState(def), deps);
+	// Phase one failed but is optional
+	assert.equal(res.state.phases.one.status, "failed");
+	// Phase two ran (dependency is optional) and saw the error output
+	assert.equal(res.state.phases.two.status, "done");
+	assert.match(res.state.phases.two.output ?? "", /review mock failure/);
+});
+
+test("runtime: failed map items include error info in combined output", async () => {
+	// When some map items fail, the combined output should include the
+	// error messages (not useless placeholders).
+	const calls: string[] = [];
+	const failSet = new Set(["do b"]);
+	const deps = baseDeps(
+		mockRunner(
+			(t) => {
+				calls.push(t);
+				if (t === "list") return '["a","b","c"]';
+				return `ok:${t}`;
+			},
+			{ fail: (t) => failSet.has(t) },
+		),
+	);
+	const def: Taskflow = {
+		name: "map-partial-fail",
+		phases: [
+			{ id: "list", type: "agent", agent: "a", task: "list", output: "json" },
+			{
+				id: "work",
+				type: "map",
+				over: "{steps.list.json}",
+				agent: "a",
+				task: "do {item}",
+				dependsOn: ["list"],
+				final: true,
+			},
+		],
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	// Map should fail (one item failed)
+	assert.equal(res.state.phases.work.status, "failed");
+	// Combined output should contain the error info, not a placeholder
+	const output = res.state.phases.work.output;
+	assert.ok(output, "output should exist");
+	assert.match(output, /\(failed\)/);
+	assert.match(output, /mock failure/);
+});
+
 test("runtime: map over non-array fails gracefully", async () => {
 	const def: Taskflow = {
 		name: "badmap",

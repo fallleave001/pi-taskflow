@@ -70,8 +70,17 @@ function buildInterpolationContext(
 ): InterpolationContext {
 	const steps: Record<string, { output: string; json?: unknown }> = {};
 	for (const [id, ps] of Object.entries(state.phases)) {
-		if (ps.status === "done" && ps.output !== undefined) {
-			steps[id] = { output: ps.output, json: ps.json };
+		// Include both done AND failed phases so downstream phases can see
+		// error info. Skipped phases (upstream failure cascade) are excluded.
+		if (ps.status === "done" || ps.status === "failed") {
+			if (ps.output !== undefined) {
+				steps[id] = { output: ps.output, json: ps.json };
+			} else if (ps.status === "failed") {
+				// M-3: Failed phases without output get a placeholder so
+				// downstream references like {steps.X.output} resolve to a
+				// sensible value instead of leaving the raw placeholder intact.
+				steps[id] = { output: "[previous phase failed]", json: undefined };
+			}
 		}
 	}
 	return { args: state.args, steps, previousOutput, locals };
@@ -80,10 +89,16 @@ function buildInterpolationContext(
 function resultToPhaseState(id: string, r: RunResult, inputHash: string, parseJson: boolean): PhaseState {
 	const failed = isFailed(r);
 	const attempts = attemptsOf(r);
+	// For failed phases, embed the error info in the output so downstream
+	// phases (and the user) can see what went wrong. The raw r.output is
+	// often a useless placeholder like "(upstream error: subagent failed)".
+	const output = failed
+		? r.errorMessage || r.stderr || r.output
+		: r.output;
 	return {
 		id,
 		status: failed ? "failed" : "done",
-		output: r.output,
+		output,
 		json: parseJson && !failed ? safeParse(r.output) : undefined,
 		usage: r.usage,
 		model: r.model,
@@ -156,8 +171,13 @@ function mergePhaseState(
 	// which model produced the merged output.
 	const model = ran.find((r) => r.model !== undefined)?.model;
 	// Combine outputs as a labelled list; also expose a JSON array of outputs.
+	// For failed items, use the error message instead of the useless placeholder.
 	const combinedText = ran
-		.map((r, i) => `### [${i + 1}/${ran.length}] ${r.agent}${isFailed(r) ? " (failed)" : ""}\n\n${r.output}`)
+		.map((r, i) => {
+			const label = `### [${i + 1}/${ran.length}] ${r.agent}${isFailed(r) ? " (failed)" : ""}`;
+			const content = isFailed(r) ? (r.errorMessage || r.stderr || r.output) : r.output;
+			return `${label}\n\n${content}`;
+		})
 		.join("\n\n---\n\n");
 	// Only successful runs feed the parsed JSON array (no error/skip strings).
 	const jsonArray = parseJson ? ran.filter((r) => !isFailed(r)).map((r) => safeParse(r.output) ?? r.output) : undefined;
@@ -373,7 +393,14 @@ async function executePhase(
 			// Backoff: prefer the explicit policy's curve when the phase defines one
 			// (covers transient retries too, and keeps tests fast with backoffMs:0),
 			// otherwise use the transient defaults.
-			const baseMs = retry ? (retry.backoffMs ?? 0) : DEFAULT_TRANSIENT_BACKOFF_MS;
+			const baseMs = retry?.backoffMs != null ? retry.backoffMs : DEFAULT_TRANSIENT_BACKOFF_MS;
+			// Factor asymmetry is intentional:
+			// - Explicit retry: backoffMs * (factor ?? 1) ^ attempt — user's
+			//   curve, defaults to flat (factor=1 → constant backoff).
+			// - Transient fallback: backoffMs * 2 ^ attempt — exponential.
+			// This lets users opt into flat retry with retry: {max:3} without
+			// specifying factor, while transient errors get proper exponential
+			// backoff.
 			const factor = retry ? (retry.factor ?? 1) : DEFAULT_TRANSIENT_FACTOR;
 			const wait = Math.min(60000, Math.round(baseMs * factor ** attempt));
 			if (wait > 0) await delay(wait, deps.signal);
@@ -742,7 +769,7 @@ async function executePhase(
 
 		for (let i = 1; i <= maxIters; i++) {
 			if (deps.signal?.aborted) {
-				stop = "failed";
+				stop = "aborted";
 				break;
 			}
 			iterations = i;
@@ -788,14 +815,14 @@ async function executePhase(
 		}
 
 		const aggUsage = usages.length ? aggregateUsage(usages) : emptyUsage();
-		if (failedResult) {
+		if (failedResult || stop === "failed" || stop === "aborted") {
 			return {
 				id: phase.id,
 				status: "failed",
 				output: lastOutput || undefined,
 				usage: aggUsage,
-				error: failedResult.errorMessage || failedResult.stderr || `loop '${phase.id}' iteration ${iterations} failed`,
-				loop: { iterations, stop: "failed" },
+				error: failedResult?.errorMessage || failedResult?.stderr || (stop === "aborted" ? "Aborted" : `loop '${phase.id}' iteration ${iterations} failed`),
+				loop: { iterations, stop },
 				warnings: loopWarnings.length ? loopWarnings : undefined,
 				inputHash: hashInput(phase.id, "loop", phase.until ?? ""),
 				endedAt: Date.now(),
@@ -863,6 +890,22 @@ async function executePhase(
 				usage: variantUsage,
 				model: ok[0].model,
 				tournament: { variants: competitors.length, winner: ranIdx(ok[0]), mode, reason: "only surviving variant" },
+				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				endedAt: Date.now(),
+			};
+		}
+
+		// Guard: skip the judge if the run is over budget or aborted.
+		if (deps.signal?.aborted || overBudget(state).over) {
+			return {
+				id: phase.id,
+				status: "done",
+				output: ok[0].output,
+				json: parseJson ? safeParse(ok[0].output) : undefined,
+				usage: variantUsage,
+				model: ok[0].model,
+				warnings: ["judge skipped: run aborted or budget exceeded"],
+				tournament: { variants: competitors.length, winner: ranIdx(ok[0]), mode, reason: "judge skipped" },
 				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
 				endedAt: Date.now(),
 			};
@@ -1288,6 +1331,10 @@ async function runTaskflowLayers(state: RunState, deps: RuntimeDeps): Promise<Ru
 				if (!budgetReason) budgetReason = "fan-out truncated by budget";
 			}
 			// Budget ceiling: once exceeded, remaining phases are skipped.
+			// For concurrent same-layer phases, the check runs after each phase
+			// completes, so at most (concurrency - 1) extra phases may run before
+			// the budget is detected as exceeded. This bounded overshoot is
+			// acceptable: budgetBlocked prevents cascading into subsequent layers.
 			const ob = overBudget(state);
 			if (ob.over && !budgetBlocked) {
 				budgetBlocked = true;

@@ -392,3 +392,39 @@ test("dependenciesOf: empty when no deps", () => {
 	const phase: Phase = { id: "p", type: "agent", task: "t" };
 	assert.deepEqual(dependenciesOf(phase), []);
 });
+
+// ════════════════════════════════════════════════════════════════════
+// ESCAPED QUOTES (M-10)
+// ════════════════════════════════════════════════════════════════════
+
+test("condition: escaped double quotes in string", () => {
+	assert.equal(evalOk('"hello \"world\"" == "hello \"world\""'), true);
+});
+
+test("condition: escaped single quotes in string", () => {
+	assert.equal(evalOk("'it\\'s' == \"it's\""), true);
+});
+
+test("condition: backslash before non-quote char is simplified", () => {
+	// \n → n, \t → t (not newline/tab). Correct for condition strings.
+	assert.equal(evalOk('"a\\nb" == "anb"'), true);
+});
+
+// ════════════════════════════════════════════════════════════════════
+// TRAILING PATH SEGMENTS (M-8)
+// ════════════════════════════════════════════════════════════════════
+
+test("interpolate: trailing segments after output return missing", () => {
+	const ctx = { args: {}, steps: { s: { output: "hello" } } };
+	const r = interpolate("{steps.s.output.extra}", ctx);
+	// The placeholder should be left intact (output is a string, not an object).
+	assert.equal(r.text, "{steps.s.output.extra}");
+	assert.deepEqual(r.missing, ["steps.s.output.extra"]);
+});
+
+test("interpolate: steps.X.output without trailing segments works", () => {
+	const ctx = { args: {}, steps: { s: { output: "hello" } } };
+	const r = interpolate("{steps.s.output}", ctx);
+	assert.equal(r.text, "hello");
+	assert.deepEqual(r.missing, []);
+});

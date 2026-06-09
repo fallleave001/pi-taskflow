@@ -402,9 +402,117 @@ test("runAgentTask: idle watchdog kills a silent (stalled) subagent", async () =
 		assert.ok(elapsed < 10_000, `should be killed quickly, took ${elapsed}ms`);
 		assert.equal(isFailed(res), true, "stalled subagent must be a failure");
 		assert.match(res.errorMessage ?? "", /stalled|idle timeout/i);
+		assert.equal(res.idleTimeout, true, "idleTimeout flag must be set");
 	} finally {
 		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
 		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+// ── signal kill detection (C-1) ─────────────────────────────────────
+
+test("runAgentTask: process killed by signal marks as failed", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-signal-"));
+	// Use a shell script that starts node, waits, then kills it with SIGKILL.
+	// The shell exits with code 137 (128+SIGKILL) — this is the standard behavior
+	// when a child process is killed by a signal and the parent reaps it.
+	const script = path.join(dir, "run.sh");
+	fs.writeFileSync(
+		script,
+		`#!/bin/sh\n"${process.execPath}" -e "setTimeout(() => {}, 60000)" &\npid=$!\nsleep 0.1\nkill -9 $pid\nwait $pid 2>/dev/null\n`,
+	);
+	fs.chmodSync(script, 0o755);
+
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	process.env.PI_TASKFLOW_PI_BIN = script;
+	try {
+		const agents: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "" },
+		];
+		const res = await runAgentTask(dir, agents, "t", "do work", {});
+		assert.equal(isFailed(res), true, "signal-killed process must be a failure");
+		// The shell exits with 137 (128+SIGKILL) which is non-zero → failure.
+		assert.ok(res.exitCode !== 0, "exitCode must be non-zero for killed process");
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("runAgentTask: signal kill preserves partial output", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-signal-partial-"));
+	// A script that emits partial output then gets killed.
+	const script = path.join(dir, "run.sh");
+	// Use a node process that writes partial output then waits forever.
+	// The shell kills it with SIGKILL after a short delay.
+	const nodeScript = path.join(dir, "worker.mjs");
+	fs.writeFileSync(
+		nodeScript,
+		`process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'partial work'}]}})+'\\n');\nsetTimeout(() => {}, 60000);\n`,
+	);
+	fs.writeFileSync(
+		script,
+		`#!/bin/sh\n"${process.execPath}" "${nodeScript}" &\npid=$!\nsleep 0.2\nkill -9 $pid\nwait $pid 2>/dev/null\n`,
+	);
+	fs.chmodSync(script, 0o755);
+
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	process.env.PI_TASKFLOW_PI_BIN = script;
+	try {
+		const agents: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "" },
+		];
+		const res = await runAgentTask(dir, agents, "t", "do work", {});
+		assert.equal(res.output, "partial work", "partial output must be preserved");
+		assert.equal(isFailed(res), true, "killed process must be a failure");
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── stderr cap (M-7) ───────────────────────────────────────────────
+
+test("runAgentTask: stderr is capped at 64KB", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-stderr-cap-"));
+	const fakePi = path.join(dir, "fake-pi.mjs");
+	// Write 100KB of garbage to stderr, then exit 0.
+	fs.writeFileSync(
+		fakePi,
+		`process.stderr.write("A".repeat(100_000));\nprocess.exit(0);\n`,
+	);
+	const shim = path.join(dir, "shim.sh");
+	fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${fakePi}"\n`);
+	fs.chmodSync(shim, 0o755);
+
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	process.env.PI_TASKFLOW_PI_BIN = shim;
+	try {
+		const agents: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "" },
+		];
+		const res = await runAgentTask(dir, agents, "t", "do work", {});
+		assert.ok(res.stderr.length <= 64 * 1024 + 50, `stderr should be capped, got ${res.stderr.length}`);
+		assert.match(res.stderr, /truncated/, "stderr cap must include truncation marker");
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── message cap (M-6) ──────────────────────────────────────────────
+
+test("foldEventLine: message cap prevents unbounded growth", () => {
+	const acc = newAccumulator();
+	const line = assistantLine({ text: "turn" });
+	for (let i = 0; i < 600; i++) {
+		foldEventLine(acc, line);
+	}
+	assert.ok(acc.messages.length <= 500, `messages capped at 500, got ${acc.messages.length}`);
+	// Usage must still accumulate beyond the cap.
+	assert.equal(acc.usage.turns, 600, "usage must accumulate even after cap");
 });

@@ -85,3 +85,15 @@ test("isTransientError: 'timeout' as substring of a non-transient message is sti
 	// is safer than fail-permanently when in doubt).
 	assert.equal(isTransientError(mkResult({ errorMessage: "Operation timeout during auth" })), true);
 });
+
+// ── Idle timeout exclusion (C-2) ───────────────────────────────────
+
+test("isTransientError: idle timeout is never transient (deterministic stall)", () => {
+	assert.equal(isTransientError(mkResult({ stopReason: "error", idleTimeout: true, errorMessage: "stalled" })), false);
+	assert.equal(isTransientError(mkResult({ stopReason: "error", idleTimeout: true })), false);
+});
+
+test("isTransientError: non-idle-timeout errors are still transient", () => {
+	assert.equal(isTransientError(mkResult({ stopReason: "error", errorMessage: "rate limit" })), true);
+	assert.equal(isTransientError(mkResult({ stopReason: "error", idleTimeout: false, errorMessage: "429" })), true);
+});

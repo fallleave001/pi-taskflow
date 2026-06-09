@@ -59,7 +59,7 @@ export interface PhaseState {
 	/** Human-in-the-loop outcome (approval phases only). */
 	approval?: { decision: "approve" | "reject" | "edit"; note?: string; auto?: boolean };
 	/** Loop iteration accounting (loop phases only). */
-	loop?: { iterations: number; stop: "until" | "converged" | "maxIterations" | "failed" };
+	loop?: { iterations: number; stop: "until" | "converged" | "maxIterations" | "failed" | "aborted" };
 	/** Tournament outcome (tournament phases only). */
 	tournament?: { variants: number; winner: number; mode: "best" | "aggregate"; reason?: string };
 	/** Non-fatal diagnostic warnings accumulated during this phase (e.g.
@@ -579,6 +579,7 @@ export function saveFlow(
 	scope: "user" | "project" = "project",
 ): { filePath: string } {
 	const dir = scope === "user" ? userFlowsDir() : (findProjectFlowsDir(cwd, true) ?? path.join(cwd, ".pi", "taskflows"));
+	if (!def.name || def.name.trim().length === 0) throw new Error("Flow name must not be empty");
 	fs.mkdirSync(dir, { recursive: true });
 	const safe = safeFlowDirName(def.name);
 	const filePath = path.join(dir, `${safe}.json`);

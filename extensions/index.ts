@@ -42,6 +42,7 @@ import {
 	DEFAULT_RUN_AGE_DAYS,
 } from "./store.ts";
 import { CacheStore } from "./cache.ts";
+import { safeParse } from "./interpolate.ts";
 
 interface TaskflowDetails {
 	state?: RunState;
@@ -441,13 +442,18 @@ export default function (pi: ExtensionAPI) {
 				const { verifyTaskflow } = await import("./verify.ts");
 				// Load definition: inline define takes priority, then saved name
 				let def: Taskflow | undefined;
-				if (params.define) {
-					const d = params.define as Record<string, unknown>;
+				let resolvedDefine: unknown = params.define;
+				if (typeof resolvedDefine === "string") {
+					const parsed = safeParse(resolvedDefine);
+					if (parsed && typeof parsed === "object") resolvedDefine = parsed;
+				}
+				if (resolvedDefine) {
+					const d = resolvedDefine as Record<string, unknown>;
 					if (typeof d === "object" && d !== null && Array.isArray(d.phases)) {
 						def = d as unknown as Taskflow;
-					} else if (isShorthand(params.define)) {
-						const r = validateTaskflow(params.define);
-						if (r.ok) def = params.define as unknown as Taskflow;
+					} else if (isShorthand(resolvedDefine)) {
+						const r = validateTaskflow(resolvedDefine);
+						if (r.ok) def = resolvedDefine as unknown as Taskflow;
 					}
 				} else if (params.name) {
 					const saved = getFlow(ctx.cwd, params.name);
@@ -505,9 +511,25 @@ export default function (pi: ExtensionAPI) {
 			// resolve the definition: inline `define` / shorthand (single|parallel|chain), else saved `name`.
 			let def: Taskflow | undefined;
 
+			// Auto-parse string `define` — LLMs sometimes pass a JSON string
+			// instead of a parsed object. safeParse handles markdown fences too.
+			let resolvedDefine: unknown = params.define;
+			if (typeof resolvedDefine === "string") {
+				const parsed = safeParse(resolvedDefine);
+				if (parsed && typeof parsed === "object") {
+					resolvedDefine = parsed;
+				} else {
+					return errorResult(
+						action,
+						`'define' was passed as a string, not a JSON object. Pass it as a proper object, e.g.:\n` +
+							`define: {"name":"my-flow","phases":[{"id":"step1","task":"do something"}]}`,
+					);
+				}
+			}
+
 			// A shorthand spec can come from `define` (no phases) or top-level params.
 			const shorthandSpec: unknown =
-				params.define ??
+				resolvedDefine ??
 				(params.chain
 					? { chain: params.chain, name: params.name }
 					: params.tasks
@@ -530,11 +552,25 @@ export default function (pi: ExtensionAPI) {
 				def = candidate as Taskflow;
 			} else if (params.name) {
 				const saved = getFlow(ctx.cwd, params.name);
-				if (!saved) return errorResult(action, `Saved flow not found: ${params.name}`);
+				if (!saved) {
+					const available = listFlows(ctx.cwd);
+					const hint = available.length
+						? ` Available flows: ${available.map((f) => f.name).join(", ")}.`
+						: " No saved flows found. Use action=save to create one, or pass 'define' for an inline flow.";
+					return errorResult(action, `Saved flow '${params.name}' not found.${hint}`);
+				}
 				def = saved.def;
 			}
 			if (!def)
-				return errorResult(action, "Provide 'define' (DSL), shorthand 'task'/'tasks'/'chain', or 'name' (saved).");
+				return errorResult(
+					action,
+					`No taskflow definition provided. Use one of:\n` +
+						`- define: {"name":"...","phases":[...]} (inline DSL object)\n` +
+						`- task: "..." (shorthand single agent)\n` +
+						`- tasks: [{"task":"..."},...] (shorthand parallel)\n` +
+						`- chain: [{"task":"..."},...] (shorthand sequential)\n` +
+						`- name: "saved-flow-name" (run a previously saved flow)`,
+				);
 
 			// save
 			if (action === "save") {
@@ -562,7 +598,17 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// run
-			const args = resolveArgs(def, params.args);
+			// Auto-parse string args — LLMs sometimes pass a JSON string.
+			let resolvedArgs: Record<string, unknown> | undefined;
+			if (typeof params.args === "string") {
+				const parsed = safeParse(params.args);
+				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+					resolvedArgs = parsed as Record<string, unknown>;
+				}
+			} else if (params.args && typeof params.args === "object") {
+				resolvedArgs = params.args as Record<string, unknown>;
+			}
+			const args = resolveArgs(def, resolvedArgs);
 			const v = validateTaskflow(def, { args, cwd: ctx.cwd });
 			if (!v.ok) return errorResult(action, `Invalid taskflow:\n- ${v.errors.join("\n- ")}`);
 			for (const w of v.warnings) {

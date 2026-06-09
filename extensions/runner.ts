@@ -25,6 +25,8 @@ export interface RunResult {
 	errorMessage?: string;
 	/** Total subagent attempts incl. retries (set by the runtime's retry wrapper). */
 	attempts?: number;
+	/** Set when the subagent was killed by the idle watchdog (not a user abort). */
+	idleTimeout?: boolean;
 }
 
 export interface LiveUpdate {
@@ -74,6 +76,8 @@ const TRANSIENT_ERROR_RE =
 	/rate[_\s-]?limit|too\s+many\s+requests|overloaded|\b429\b|\b503\b|\b502\b|\b504\b|service\s+unavailable|temporarily\s+unavailable|timeout|timed?\s+out|econnreset|etimedout|socket\s+hang\s*up/i;
 export function isTransientError(r: RunResult): boolean {
 	if (r.stopReason === "aborted") return false;
+	// Idle timeout is a deterministic stall — retrying won't help.
+	if (r.stopReason === "error" && r.idleTimeout) return false;
 	const hay = `${r.errorMessage ?? ""} ${r.stderr ?? ""} ${r.output ?? ""}`;
 	return TRANSIENT_ERROR_RE.test(hay);
 }
@@ -153,6 +157,8 @@ export interface EventAccumulator {
 	stopReason?: string;
 	errorMessage?: string;
 	lastActivity: string;
+	/** Set when message cap was hit — output gets a truncation notice. */
+	truncated?: boolean;
 }
 
 export function newAccumulator(model?: string): EventAccumulator {
@@ -175,7 +181,15 @@ export function foldEventLine(acc: EventAccumulator, line: string): LiveUpdate |
 	}
 	if (event.type !== "message_end" || !event.message) return null;
 	const msg = event.message as Message;
-	acc.messages.push(msg);
+	// Cap prevents OOM from misconfigured loops. 500 messages is generous for
+	// normal subagent tasks (50 turns × 10 messages each). Messages beyond the
+	// cap are still parsed for usage/model/stopReason extraction.
+	const MAX_MESSAGES = 500;
+	if (acc.messages.length < MAX_MESSAGES) {
+		acc.messages.push(msg);
+	} else {
+		acc.truncated = true;
+	}
 	if (msg.role !== "assistant") return null;
 	acc.usage.turns++;
 	const u = (msg as any).usage;
@@ -323,6 +337,7 @@ export async function runAgentTask(
 
 		let wasAborted = false;
 		let idleTimedOut = false;
+		let killedBySignal: string | undefined;
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
@@ -371,12 +386,19 @@ export async function runAgentTask(
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
 			});
+			// Cap prevents OOM from verbose tool output (e.g., npm install). 64 KB is
+			// generous for error diagnosis while preventing memory exhaustion.
+			const STDERR_MAX_LEN = 64 * 1024;
 			proc.stderr.on("data", (data) => {
 				result.stderr += data.toString();
+				if (result.stderr.length >= STDERR_MAX_LEN) {
+					result.stderr = result.stderr.slice(0, STDERR_MAX_LEN) + "\n[...stderr truncated at 64KB]";
+				}
 			});
-			proc.on("close", (code) => {
+			proc.on("close", (code, signal) => {
 				clearTimers();
 				if (buffer.trim()) processLine(buffer);
+				if (code === null && signal) killedBySignal = signal;
 				resolve(code ?? 0);
 			});
 			proc.on("error", (err) => {
@@ -411,11 +433,25 @@ export async function runAgentTask(
 		result.stopReason = acc.stopReason;
 		result.errorMessage = acc.errorMessage;
 		result.output = getFinalOutput(acc.messages);
+		// M-6: surface truncation when the message cap was hit so downstream
+		// phases and the user know output was cut short.
+		if (acc.truncated) {
+			result.output += "\n\n[...output truncated after 500 messages]";
+		}
+		// Signal kill detection: process exited 0 but was killed by a signal
+		// (e.g. OOM killer, cgroup limit). Treat as failure so the runtime's
+		// retry/fail handling doesn't silently accept a truncated result.
+		if (exitCode === 0 && killedBySignal && !idleTimedOut && !wasAborted) {
+			result.exitCode = 1;
+			result.stopReason = "error";
+			result.errorMessage = `Subagent killed by signal ${killedBySignal}`;
+		}
 		if (idleTimedOut) {
 			// Distinct, actionable signal: the child was killed for being idle, not
 			// a user abort. stopReason "error" keeps it in the failed bucket so the
 			// runtime's retry/fail handling treats it as a real failure.
 			result.stopReason = "error";
+			result.idleTimeout = true;
 			result.errorMessage = `Subagent stalled: no output for ${Math.round((opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS) / 1000)}s (idle timeout) — killed`;
 		} else if (wasAborted) {
 			result.stopReason = "aborted";

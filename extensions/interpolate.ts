@@ -66,7 +66,13 @@ function resolvePath(path: string, ctx: InterpolationContext): unknown {
 		const step = stepId ? ctx.steps[stepId] : undefined;
 		if (!step) return undefined;
 		const field = parts[2];
-		if (field === "output") return step.output;
+		if (field === "output") {
+			// Guard: {steps.X.output.trailing} — trailing segments after output are
+			// likely author errors (output is a string, not an object). Return
+			// undefined so the placeholder is left intact with a missing warning.
+			if (parts.length > 3) return undefined;
+			return step.output;
+		}
 		if (field === "json") {
 			const json = step.json ?? safeParse(step.output);
 			return dig(json, parts.slice(3));
@@ -82,6 +88,12 @@ function resolvePath(path: string, ctx: InterpolationContext): unknown {
 	return undefined;
 }
 
+/**
+ * Traverse an object by a sequence of property keys. Returns `undefined`
+ * when any segment is missing or the current value is not an object —
+ * never throws, so extra path segments like {steps.X.json.a.b} where the
+ * data is shallower resolve gracefully to undefined (M-8).
+ */
 function dig(obj: unknown, parts: string[]): unknown {
 	let cur: unknown = obj;
 	for (const part of parts) {
@@ -219,10 +231,25 @@ function tokenize(input: string): Tok[] {
 		}
 		// quoted string
 		if (c === '"' || c === "'") {
-			const end = input.indexOf(c, i + 1);
-			if (end === -1) throw new Error("unterminated string");
-			toks.push({ t: "str", v: input.slice(i + 1, end) });
-			i = end + 1;
+			// Handle escaped quotes. Note: ALL \X sequences are interpreted as literal X
+			// (including \n → n, \t → t). This differs from JSON/JS escaping but is
+			// correct for condition strings which only need quote escaping.
+			let j = i + 1;
+			let val = "";
+			while (j < n) {
+				if (input[j] === "\\" && j + 1 < n) {
+					val += input[j + 1];
+					j += 2;
+				} else if (input[j] === c) {
+					break;
+				} else {
+					val += input[j];
+					j++;
+				}
+			}
+			if (j >= n) throw new Error("unterminated string");
+			toks.push({ t: "str", v: val });
+			i = j + 1;
 			continue;
 		}
 		// multi/single char operators
