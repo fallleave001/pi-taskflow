@@ -47,9 +47,13 @@ function resolveOne(entry: string, cwd: string): string {
 					cwd,
 					encoding: "utf-8",
 					stdio: ["ignore", "pipe", "ignore"],
+					timeout: 30_000,
 				}).trim();
 				return `git:${ref}=${sha}`;
-			} catch {
+			} catch (e: unknown) {
+				if ((e as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+					return `git:${ref}=<timeout>`;
+				}
 				return `git:${ref}=<no-git>`;
 			}
 		}

@@ -21,7 +21,7 @@ export interface TaskflowSettings {
 	maxRunAgeDays: number;
 }
 
-import { DEFAULT_KEPT_RUNS, DEFAULT_RUN_AGE_DAYS } from "./store.ts";
+import { DEFAULT_KEPT_RUNS, DEFAULT_RUN_AGE_DAYS, writeFileAtomic } from "./store.ts";
 
 export const DEFAULT_TASKFLOW_SETTINGS: TaskflowSettings = {
 	builtInAgents: true,
@@ -114,16 +114,18 @@ function loadAgentsFromDir(dir: string, source: "user" | "project" | "built-in")
 			if (!frontmatter.name || !frontmatter.description) continue;
 
 			// frontmatter is YAML-parsed: tools may be a comma-separated string ("a, b")
-			// OR a YAML sequence ([a, b]). Handle both forms.
+			// OR a YAML sequence ([a, b]). Handle both forms; reject other types to
+			// prevent garbage output from malformed YAML (e.g. boolean, number).
 			const rawTools = frontmatter.tools;
-			const tools: string[] | undefined = Array.isArray(rawTools)
-				? rawTools.map((t) => String(t).trim()).filter(Boolean)
-				: rawTools !== undefined && rawTools !== null
-					? String(rawTools)
-							.split(",")
-							.map((t) => t.trim())
-							.filter(Boolean)
-					: undefined;
+			let tools: string[] | undefined;
+			if (Array.isArray(rawTools)) {
+				tools = rawTools.map((t) => String(t).trim()).filter(Boolean);
+			} else if (typeof rawTools === "string") {
+				tools = rawTools.split(",").map((t) => t.trim()).filter(Boolean);
+			} else if (rawTools !== undefined && rawTools !== null) {
+				console.warn(`[taskflow] Agent '${String(frontmatter.name)}': 'tools' must be a string or array, got ${typeof rawTools}. Ignoring.`);
+				tools = undefined;
+			}
 
 			agents.push({
 				name: String(frontmatter.name),
@@ -285,7 +287,7 @@ export function syncBuiltinAgentsToProject(cwd: string): void {
 
 		try {
 			const content = fs.readFileSync(src, "utf-8");
-			fs.writeFileSync(dst, content, "utf-8");
+			writeFileAtomic(dst, content);
 		} catch {
 			// Best-effort: a locked file must not block the sync.
 		}

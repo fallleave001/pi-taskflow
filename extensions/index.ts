@@ -625,7 +625,14 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme) {
 			const action = args.action ?? "run";
-			let label = args.name || (args.define as { name?: string } | undefined)?.name;
+			let label = args.name;
+		if (!label) {
+			let define = args.define;
+			if (typeof define === "string") {
+				try { define = JSON.parse(define); } catch { /* not JSON */ }
+			}
+			label = (define as { name?: string } | undefined)?.name;
+		}
 			let suffix = "";
 			const phases = (args.define as Taskflow | undefined)?.phases;
 			if (phases) suffix = ` (${phases.length} phases)`;
@@ -659,7 +666,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("tf", {
 		description: "Taskflow: list | run <name> | show <name> | runs | init",
 		getArgumentCompletions: (prefix) => {
-			const subs = ["list", "run", "show", "runs", "resume", "init"];
+			const subs = ["list", "run", "show", "runs", "resume", "init", "save", "verify"];
 			const items = subs.map((s) => ({ value: s, label: s }));
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
@@ -843,13 +850,13 @@ function parseArgsString(input: string, def: Taskflow): Record<string, unknown> 
 	}
 	// key=value pairs
 	const out: Record<string, unknown> = {};
-	const pairs = trimmed.match(/(\w+)=("[^"]*"|\S+)/g);
+	const pairs = trimmed.match(/(\w+)=("(?:[^"\\]|\\.)*"|\S+)/g);
 	if (pairs) {
 		for (const p of pairs) {
 			const idx = p.indexOf("=");
 			const k = p.slice(0, idx);
 			let v: string = p.slice(idx + 1);
-			if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+			if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1).replace(/\\"/g, '"');
 			out[k] = v;
 		}
 		return out;

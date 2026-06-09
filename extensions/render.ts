@@ -104,7 +104,7 @@ export function summarizeRun(state: RunState): string {
 	const done = phases.filter((p) => p.status === "done").length;
 	const failed = phases.filter((p) => p.status === "failed").length;
 	const running = phases.filter((p) => p.status === "running").length;
-	const total = state.def.phases.length;
+	const total = Object.keys(state.phases).length;
 	const bits = [`${done}/${total} done`];
 	if (running) bits.push(`${running} running`);
 	if (failed) bits.push(`${failed} failed`);
@@ -254,7 +254,7 @@ function headerLine(state: RunState, theme: Theme): string {
 	const done = phases.filter((p) => p.status === "done").length;
 	const failed = phases.filter((p) => p.status === "failed").length;
 	const running = phases.filter((p) => p.status === "running").length;
-	const total = state.def.phases.length;
+	const total = Object.keys(state.phases).length;
 
 	const head =
 		state.status === "completed"

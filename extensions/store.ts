@@ -603,6 +603,8 @@ export function saveFlow(
 // --- Run state ---
 
 function runsDir(cwd: string): string {
+	// Safe non-null assertion: create=true guarantees a non-null return because
+	// findProjectFlowsDirInternal falls back to path.join(cwd, ".pi", "taskflows").
 	const projDir = findProjectFlowsDir(cwd, true)!;
 	return path.join(projDir, "runs");
 }

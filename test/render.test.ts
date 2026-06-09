@@ -159,7 +159,7 @@ test("summarizeRun: reports done / running / failed counts", () => {
 		},
 	);
 	const s = summarizeRun(state);
-	assert.match(s, /1\/6 done/);
+	assert.match(s, /1\/3 done/);
 	assert.match(s, /1 running/);
 	assert.match(s, /1 failed/);
 });
