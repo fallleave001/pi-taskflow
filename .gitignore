@@ -2,18 +2,10 @@ node_modules/
 dist/
 *.log
 .DS_Store
-.pi/taskflows/runs/
-.pi/taskflows/cache/
-.pi/agents/
-
-# Lockfile omitted: generated against internal mirror locally; CI installs from public npm
 package-lock.json
 
+# Runtime state (never commit)
+.pi/taskflows/
 .pi/teams/
-
-/.crew/
-/.crew
-!.crew/artifacts/
-!.crew/graphs/
-!.crew/artifacts/.gitkeep
-!.crew/graphs/.gitkeep
+.pi/agents/
+.crew/

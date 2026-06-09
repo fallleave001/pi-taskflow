@@ -32,12 +32,7 @@
     "examples",
     "README.md",
     "README.zh-CN.md",
-    "README.hi.md",
-    "README.es.md",
-    "README.ar.md",
-    "README.bn.md",
-    "README.pt.md",
-    "README.ru.md",
+    "CHANGELOG.md",
     "DESIGN.md",
     "LICENSE"
   ],
@@ -53,7 +48,8 @@
     ],
     "skills": [
       "./skills"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/heggria/pi-taskflow/main/assets/social-preview.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
