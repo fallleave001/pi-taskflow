@@ -11,7 +11,7 @@ Configuration lives in **five layers**, from most local to most global:
 | Phase | a phase object in the DSL | per-step model/thinking/tools/cwd/output/concurrency |
 | Flow | the top-level DSL object | name, args, default concurrency, agent scope |
 | Agent | `~/.pi/agent/agents/*.md`, `.pi/agents/*.md` frontmatter | per-agent default model/thinking/tools + system prompt |
-| Settings | `~/.pi/agent/settings.json` | `subagents.agentOverrides`, global thinking |
+| Settings | `~/.pi/agent/settings.json` | `modelRoles`, global thinking |
 | Environment | shell env | `PI_TASKFLOW_PI_BIN` |
 
 ---
@@ -156,9 +156,9 @@ For any phase, the effective value is resolved in this **precedence order**
 
 | Setting | Precedence (high → low) |
 |---------|-------------------------|
-| **model** | `phase.model` → `settings.agentOverrides[agent].model` → agent frontmatter `model` → pi default |
-| **thinking** | `phase.thinking` → `settings.agentOverrides[agent].thinking` → agent frontmatter `thinking` → `settings` global thinking → pi default |
-| **tools** | `phase.tools` → `settings.agentOverrides[agent].tools` → agent frontmatter `tools` → all tools |
+| **model** | `phase.model` → agent frontmatter `model` (resolved via `modelRoles`) → pi default |
+| **thinking** | `phase.thinking` → agent frontmatter `thinking` → `settings` global thinking → pi default |
+| **tools** | `phase.tools` → agent frontmatter `tools` → all tools |
 
 Notes:
 - `tools` is a **whitelist** passed as `--tools a,b,c`. Omit it to allow all.
@@ -192,19 +192,18 @@ Taskflow shares the subagent settings file at `~/.pi/agent/settings.json`:
 
 ```jsonc
 {
+  "modelRoles": {
+    "fast": "openrouter/deepseek/deepseek-v4-flash",
+    "strong": "openrouter/xiaomi/mimo-v2.5-pro"
+  },
   "subagents": {
-    "globalThinking": "medium",          // fallback thinking for all subagents
-    "agentOverrides": {
-      "analyst": { "model": "claude-sonnet-4-5", "thinking": "high" },
-      "scout":   { "tools": ["read", "bash", "grep"] }
-    }
+    "globalThinking": "medium"              // fallback thinking for all subagents
   },
   "defaultThinkingLevel": "low"          // used if subagents.globalThinking is absent
 }
 ```
 
-- `subagents.agentOverrides` — per-agent overrides applied at discovery; they beat
-  agent frontmatter but lose to a phase-level value (see §5).
+- `modelRoles` — maps `{{role}}` references in agent frontmatter to actual model identifiers.
 - `subagents.globalThinking` (or top-level `defaultThinkingLevel`) — global
   thinking fallback.
 

@@ -522,19 +522,9 @@ Your choices are written to `~/.pi/agent/settings.json`:
 }
 ```
 
-Edit the values manually any time, or just re-run `/tf init`. You can also override individual agents via `subagents.agentOverrides` in the same file:
+Edit the values manually any time, or just re-run `/tf init`.
 
-```json
-{
-  "modelRoles": { ... },
-  "subagents": {
-    "agentOverrides": {
-      "executor": { "model": "anthropic/claude-sonnet-4-20250514" },
-      "reviewer": { "thinking": "xhigh" }
-    }
-  }
-}
-```
+To customize a specific agent's model or thinking without changing `modelRoles`, create an agent file at `~/.pi/agent/agents/<name>.md` with the desired overrides in the YAML frontmatter.
 
 ### Tool path (`action="init"`)
 
