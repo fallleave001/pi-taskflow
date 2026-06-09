@@ -69,7 +69,7 @@ docs/                 ← Design docs, RFCs, dogfooding reports
 
 ```bash
 npm run typecheck     # tsc --noEmit (type-check only, no emit)
-npm test              # 519 unit tests via node --experimental-strip-types --test
+npm test              # 535 unit tests via node --experimental-strip-types --test
 npm run test:e2e      # End-to-end tests (needs live pi + model access)
 ```
 

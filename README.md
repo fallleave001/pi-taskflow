@@ -8,7 +8,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-43D9AD?style=flat-square" alt="MIT license"></a>
   <a href="#whats-inside"><img src="https://img.shields.io/badge/runtime%20deps-0-43D9AD?style=flat-square" alt="zero runtime dependencies"></a>
   <a href="https://github.com/heggria/pi-taskflow/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/heggria/pi-taskflow/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
-  <a href="#whats-inside"><img src="https://img.shields.io/badge/tests-524-6E8BFF?style=flat-square" alt="524 tests"></a>
+  <a href="#whats-inside"><img src="https://img.shields.io/badge/tests-535-6E8BFF?style=flat-square" alt="535 tests"></a>
   <a href="#whats-inside"><img src="https://img.shields.io/badge/dogfooded-%E2%9C%93-43D9AD?style=flat-square" alt="dogfooded"></a>
   <a href="https://pi.dev"><img src="https://img.shields.io/badge/for-Pi%20coding%20agent-B692FF?style=flat-square" alt="for the Pi coding agent"></a>
 </p>
@@ -16,12 +16,12 @@
 <p align="center">
   <b>English</b> ·
   <a href="./README.zh-CN.md">简体中文</a> ·
-  <a href="./README.hi.md">हिन्दी</a> ·
-  <a href="./README.es.md">Español</a> ·
-  <a href="./README.ar.md">العربية</a> ·
-  <a href="./README.bn.md">বাংলা</a> ·
-  <a href="./README.pt.md">Português</a> ·
-  <a href="./README.ru.md">Русский</a>
+  <a href="./docs/i18n/README.hi.md">हिन्दी</a> ·
+  <a href="./docs/i18n/README.es.md">Español</a> ·
+  <a href="./docs/i18n/README.ar.md">العربية</a> ·
+  <a href="./docs/i18n/README.bn.md">বাংলা</a> ·
+  <a href="./docs/i18n/README.pt.md">Português</a> ·
+  <a href="./docs/i18n/README.ru.md">Русский</a>
 </p>
 
 <p><strong>Declarative DAG orchestration for <a href="https://pi.dev">Pi</a> subagents.</strong><br/>
@@ -536,7 +536,6 @@ The model can also configure roles via the `taskflow` tool:
 | `mode: "apply-defaults"` + `force: true` | Writes `RECOMMENDED_DEFAULTS` to `settings.json`, preserving stale keys. |
 | `mode: "interactive"` | Launches the full action menu + picker flow (requires a UI session). |
 
-> **v0.0.13 deprecation note:** If `mode` is omitted, the tool falls back to v0.0.12 behavior when `modelRoles` is empty (auto-writes defaults) with a `console.warn` deprecation notice. If `modelRoles` already exists, it behaves as `mode: "show"`. This bridge will be removed in v0.0.14.
 
 ### Custom agents
 
@@ -577,12 +576,12 @@ Copy one into `.pi/taskflows/<name>.json` (or `~/.pi/agent/taskflows/`) and it r
 
 <div align="center">
 
-**0 runtime dependencies** · **524 tests** · **9 phase types** · **cross-session resume** · **cross-run memoization** · **~4.9k LOC runtime**
+**0 runtime dependencies** · **535 tests** · **9 phase types** · **cross-session resume** · **cross-run memoization** · **~5.4k LOC runtime**
 
 </div>
 
 - **Zero runtime dependencies.** No `dependencies` field — the runtime is built entirely on Node built-ins (`fs` / `path` / `os` / `child_process` / `crypto`). The file lock is `fs.openSync("wx")`, not a third-party library.
-- **371 tests across 14 suites** covering concurrency, atomic file locking (8-process race regressions), path-traversal hardening, cross-session resume, cross-run cache freshness (flow/thinking/tools key isolation, fingerprint invalidation, TTL/LRU eviction), gate verdicts, budget caps, retry/backoff, approval flows, loop termination, tournament judging, sub-flow composition, callback isolation, the idle watchdog, model-role init config, and parseModelFromLabel with parenthesized-model-name regression — plus a live end-to-end test that spawns real subagents and a cross-run cache dogfood.
+- **535 tests across 21 test files** covering concurrency, atomic file locking (8-process race regressions), path-traversal hardening, cross-session resume, cross-run cache freshness (flow/thinking/tools key isolation, fingerprint invalidation, TTL/LRU eviction), gate verdicts, budget caps, retry/backoff, approval flows, loop termination, tournament judging, sub-flow composition, callback isolation, the idle watchdog, model-role init config, and parseModelFromLabel with parenthesized-model-name regression.
 - **Hardened by design.** Path-traversal defense (lexical + `realpath`), runId validation, HTML/error sanitization, atomic writes, stale-lock stealing via `rename`, and an idle watchdog that kills wedged subagents.
 - **Dogfooded.** Every new feature has to survive the project's own `self-improve` taskflow before it ships.
 
@@ -599,12 +598,14 @@ Our `self-improve` flow is a 10-phase DAG — it audits the codebase, patches de
 | [Cross-run cache dogfood](./docs/rfc-cross-run-memoization.md) | Real runtime + on-disk store | Dedicated test harness | Cache correctness under adversarial fingerprints |
 | [Adversarial cross-review](./docs/brainstorm-adversarial-review-report.md) | Multi-agent adversarial review | `tournament` + `gate` | P0 cache-key fix shipped |
 | [Init redesign review](./docs/issue-necessity-review-report.md) | Necessity audit → parallel checks → verdict | 7 phases | Full redesign plan validated |
+| [Round 2 adversarial audit](./docs/internal/dogfooding-report.md) | Phase-by-phase DAG execution — 12 findings across runner/runtime/interpolate/verify | 14 phases | 10 fixes applied, 0 regressions |
+| [Round 3 adversarial audit](./docs/internal/dogfooding-report.md) | Integration layer + cross-module — 10 findings across index/agents/cache/render/runs-view | 9 phases | 10 fixes applied, 0 regressions |
 
 > **Meta:** we used `pi-taskflow`'s `map` fan-out, `gate` verdicts, `approval` human-in-the-loop, `tournament` best-of-N, `loop` until-done, and `cross-run` cache — to build `pi-taskflow`.
 
 ## Status & limits
 
-**v0.0.16** — loop-until-done (`loop` phase: iterate to a condition, convergence, or cap), tournament (best-of-N with a judge), cross-run memoization (content-addressed cache with git/file/glob/env fingerprints and TTL), interactive `/tf init` with role-aware model pickers + diff preview + atomic merge-write, configurable built-in agents, 18 built-in agents with 6 model roles. Full control-flow & reliability layer (`when` guards, `join: any`, `retry`/backoff, `approval`, `flow` composition, `budget` caps, idle watchdog) on top of the DSL + DAG runtime (`agent`/`parallel`/`map`/`gate`/`reduce`). Inline + saved flows, cross-session resume, live progress, and isolated context. A run executes as one streaming tool call.
+**v0.0.17** — loop-until-done (`loop` phase: iterate to a condition, convergence, or cap), tournament (best-of-N with a judge), cross-run memoization (content-addressed cache with git/file/glob/env fingerprints and TTL), interactive `/tf init` with role-aware model pickers + diff preview + atomic merge-write, configurable built-in agents, 18 built-in agents with 6 model roles. Full control-flow & reliability layer (`when` guards, `join: any`, `retry`/backoff, `approval`, `flow` composition, `budget` caps, idle watchdog) on top of the DSL + DAG runtime (`agent`/`parallel`/`map`/`gate`/`reduce`). Inline + saved flows, cross-session resume, live progress, and isolated context. A run executes as one streaming tool call.
 
 Known boundaries (tracked, bounded — no surprises mid-flow):
 
@@ -622,7 +623,7 @@ npm test            # unit tests — no network, no process spawning
 npm run test:e2e    # real end-to-end (spawns live subagents; needs model access)
 ```
 
-Runtime lives in `extensions/`, tests in `test/`, runnable examples in `examples/`, and the full design rationale in [`DESIGN.md`](./DESIGN.md).
+Runtime lives in `extensions/`, tests in `test/`, and runnable examples in `examples/`.
 
 ## Contributing
 

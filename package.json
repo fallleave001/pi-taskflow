@@ -33,7 +33,6 @@
     "README.md",
     "README.zh-CN.md",
     "CHANGELOG.md",
-    "DESIGN.md",
     "LICENSE"
   ],
   "scripts": {
