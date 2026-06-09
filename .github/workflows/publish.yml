@@ -1,12 +1,9 @@
-name: Publish to npm
+name: Publish & Release
 
-# Publishes to the public npm registry when a GitHub Release is published,
-# or when a v* tag is pushed. Requires the NPM_TOKEN repository secret
-# (an Automation token from your PUBLIC npm account).
+# Publishes to npmjs.com + GitHub Packages, and creates a GitHub Release,
+# when a v* tag is pushed (e.g. `git tag v0.0.16 && git push --tags`).
 
 on:
-  release:
-    types: [published]
   push:
     tags:
       - "v*"
@@ -15,8 +12,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      id-token: write # enables npm provenance
+      contents: write    # create GitHub Release
+      id-token: write    # npm provenance
+      packages: write    # GitHub Packages
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,7 +33,6 @@ jobs:
         run: npm test
 
       - name: Verify tag matches package version
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           PKG_VERSION="v$(node -p "require('./package.json').version")"
           TAG="${GITHUB_REF_NAME}"
@@ -43,7 +41,34 @@ jobs:
             exit 1
           fi
 
-      - name: Publish (public, with provenance)
+      - name: Publish to npmjs.com
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to GitHub Packages
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > ~/.npmrc
+          echo "registry=https://npm.pkg.github.com/heggria" >> ~/.npmrc
+          npm publish
+
+      - name: Create GitHub Release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "
+            const fs = require('fs');
+            const content = fs.readFileSync('CHANGELOG.md', 'utf-8');
+            const lines = content.split('\n');
+            let capturing = false, body = [];
+            for (const line of lines) {
+              if (line.startsWith('## [' + process.argv[1] + ']')) { capturing = true; }
+              else if (capturing && line.startsWith('## [')) { break; }
+              if (capturing) body.push(line);
+            }
+            fs.writeFileSync('/tmp/release-notes.md', body.join('\n').trim());
+          " "$VERSION"
+          gh release create "$GITHUB_REF_NAME" \
+            --notes-file /tmp/release-notes.md \
+            --title "pi-taskflow $VERSION"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
