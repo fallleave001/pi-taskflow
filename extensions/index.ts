@@ -59,6 +59,15 @@ const ShorthandStep = Type.Object(
 	{
 		agent: Type.Optional(Type.String({ description: "Agent for this step (defaults to the first available agent)" })),
 		task: Type.String({ description: "Task prompt for this step (supports {previous.output} in chains)" }),
+		context: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"File paths to pre-read and inject before this step's task (same as Phase.context). In parallel `tasks` mode all branches SHARE the union of step contexts.",
+			}),
+		),
+		contextLimit: Type.Optional(
+			Type.Number({ description: "Max characters to read per context file (default 8000)." }),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -81,6 +90,15 @@ const TaskflowParams = Type.Object({
 	),
 	task: Type.Optional(
 		Type.String({ description: "Shorthand single mode: the task prompt (like subagent single mode)" }),
+	),
+	context: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"Shorthand single mode: file paths to pre-read and inject before the task (same as Phase.context).",
+		}),
+	),
+	contextLimit: Type.Optional(
+		Type.Number({ description: "Shorthand single mode: max characters to read per context file (default 8000)." }),
 	),
 	tasks: Type.Optional(
 		Type.Array(ShorthandStep, {
@@ -573,7 +591,7 @@ export default function (pi: ExtensionAPI) {
 					: params.tasks
 						? { tasks: params.tasks, name: params.name }
 						: params.task
-							? { task: params.task, agent: params.agent, name: params.name }
+							? { task: params.task, agent: params.agent, name: params.name, context: params.context, contextLimit: params.contextLimit }
 							: undefined);
 
 			if (shorthandSpec !== undefined) {

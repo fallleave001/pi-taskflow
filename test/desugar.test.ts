@@ -114,6 +114,67 @@ test("desugar: precedence chain > tasks > task", () => {
 });
 
 // ---------------------------------------------------------------------------
+// desugar — context pass-through
+// ---------------------------------------------------------------------------
+
+test("desugar: warns when chain shorthand carries top-level context (flow-level default unsupported)", () => {
+	const warnings: string[] = [];
+	const orig = console.warn;
+	console.warn = (...a: unknown[]) => warnings.push(a.join(" "));
+	try {
+		desugar({ chain: [{ task: "a" }], context: ["AGENTS.md"] });
+		desugar({ task: "x", context: ["AGENTS.md"] });
+		desugar({ tasks: [{ task: "a" }], context: ["AGENTS.md"] });
+	} finally {
+		console.warn = orig;
+	}
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0], /chain ignores top-level 'context'/);
+});
+
+test("desugar single: context + contextLimit land on the main phase", () => {
+	const def = desugar({ task: "x", context: ["AGENTS.md", "README.md"], contextLimit: 4000 });
+	assert.deepEqual(def.phases[0].context, ["AGENTS.md", "README.md"]);
+	assert.equal(def.phases[0].contextLimit, 4000);
+	assert.equal(validateTaskflow(def).ok, true);
+});
+
+test("desugar chain: per-step context lands on the matching phase only", () => {
+	const def = desugar({
+		chain: [
+			{ task: "a", context: ["AGENTS.md"], contextLimit: 2000 },
+			{ task: "b" },
+			{ task: "c", context: ["docs/x.md"] },
+		],
+	});
+	assert.deepEqual(def.phases[0].context, ["AGENTS.md"]);
+	assert.equal(def.phases[0].contextLimit, 2000);
+	assert.equal(def.phases[1].context, undefined);
+	assert.equal(def.phases[1].contextLimit, undefined);
+	assert.deepEqual(def.phases[2].context, ["docs/x.md"]);
+	assert.equal(validateTaskflow(def).ok, true);
+});
+
+test("desugar tasks: step contexts are unioned (shared) on the parallel phase; max limit wins", () => {
+	const def = desugar({
+		context: ["AGENTS.md"],
+		tasks: [
+			{ task: "a", context: ["x.ts", "AGENTS.md"], contextLimit: 1000 },
+			{ task: "b", context: ["y.ts"], contextLimit: 9000 },
+		],
+	});
+	assert.deepEqual(def.phases[0].context, ["AGENTS.md", "x.ts", "y.ts"]);
+	assert.equal(def.phases[0].contextLimit, 9000);
+	assert.equal(validateTaskflow(def).ok, true);
+});
+
+test("desugar: malformed context values are ignored (non-array, empty strings, non-strings)", () => {
+	assert.equal(desugar({ task: "x", context: "AGENTS.md" }).phases[0].context, undefined);
+	assert.equal(desugar({ task: "x", context: [] }).phases[0].context, undefined);
+	assert.deepEqual(desugar({ task: "x", context: ["a.ts", "", 42, "  "] }).phases[0].context, ["a.ts"]);
+});
+
+// ---------------------------------------------------------------------------
 // desugar — end-to-end execution through the runtime (mock runner)
 // ---------------------------------------------------------------------------
 
@@ -182,4 +243,24 @@ test("e2e: desugared chain feeds {previous.output} forward", async () => {
 	assert.equal(res.ok, true);
 	assert.deepEqual(record, ["start", "use out:start"]);
 	assert.equal(res.finalOutput, "out:use out:start");
+});
+
+
+test("e2e: shorthand context pre-reads the file and prepends it to the task", async (t) => {
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "tf-ctx-"));
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	const file = path.join(dir, "conventions.md");
+	fs.writeFileSync(file, "USE-HYPHENS-IN-IDS");
+
+	const def = desugar({ agent: "a", task: "do the thing", context: [file] });
+	const record: string[] = [];
+	const res = await executeTaskflow(mkState(def), deps(mockRunner(() => "ok", record)));
+	assert.equal(res.ok, true);
+	assert.equal(record.length, 1);
+	assert.match(record[0], /## File: .*conventions\.md/);
+	assert.match(record[0], /USE-HYPHENS-IN-IDS/);
+	assert.match(record[0], /do the thing$/);
 });

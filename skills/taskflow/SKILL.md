@@ -43,9 +43,24 @@ proper flow, so you still get progress, persistence, resume, and `save`.
 ```
 
 - `agent` is optional (defaults to the first available agent).
+- `context` (optional, per step or top-level in single mode): file paths to
+  pre-read and inject before the task — same as the full-DSL `Phase.context`
+  (per-file `contextLimit`, default 8000 chars). In **parallel `tasks` mode**
+  all branches SHARE the union of step contexts (the runtime pre-reads per
+  phase, not per branch). In **chain mode** declare `context` on individual
+  steps; a top-level `context` is ignored (with a warning).
 - Add `name` to label the run (and to `save` it as a `/tf:<name>` command).
 - Precedence if several are given: `chain` > `tasks` > `task`.
 - You can pass these as top-level tool params **or** inside `define`.
+
+```jsonc
+// context pre-read in shorthand — the file content is injected before the task
+{ "chain": [
+  { "task": "Map the public API of src/lib", "agent": "scout" },
+  { "task": "Write docs for:\n{previous.output}", "agent": "doc-writer",
+    "context": ["AGENTS.md", "docs/style-guide.md"] }
+] }
+```
 
 ## How to author a taskflow
 

@@ -392,6 +392,7 @@ async function executePhase(
 		runId: state.runId,
 		thinking: phase.thinking,
 		tools: phase.tools,
+		preRead,
 	};
 
 	const baseRun = (agentName: string, task: string, onLive?: (l: LiveUpdate) => void) =>
@@ -1185,15 +1186,26 @@ interface PhaseCacheCtx {
 	 *  silently serve a stale cross-run hit). */
 	thinking?: string;
 	tools?: string[];
+	/** Resolved `context` pre-read content. Explicitly part of the cache identity
+	 *  so a context-file change always invalidates the phase — independent of
+	 *  whether a given branch happens to fold preRead into its task string
+	 *  (previously this was only incidentally true via `fullTask`). */
+	preRead?: string;
 }
 
 /** Fold the phase fingerprint into the base hash parts to form the final cache key. */
 function cacheKey(cc: PhaseCacheCtx, baseParts: string[]): string {
 	// Fold the full cache identity into the hash: flow name (prevents collisions
 	// across different flows that share a phase.id + task + model), the per-phase
-	// thinking/tools config (changing either changes the subagent's output), and
-	// the resolved world-state fingerprint.
-	const parts = [`flow:${cc.flowName}`, ...baseParts, `think:${cc.thinking ?? ""}`, `tools:${JSON.stringify(cc.tools ?? [])}`];
+	// thinking/tools config (changing either changes the subagent's output), the
+	// resolved context pre-read content, and the world-state fingerprint.
+	const parts = [
+		`flow:${cc.flowName}`,
+		...baseParts,
+		`think:${cc.thinking ?? ""}`,
+		`tools:${JSON.stringify(cc.tools ?? [])}`,
+		`ctx:${cc.preRead ?? ""}`,
+	];
 	return cc.fingerprint ? hashInput(...parts, cc.fingerprint) : hashInput(...parts);
 }
 

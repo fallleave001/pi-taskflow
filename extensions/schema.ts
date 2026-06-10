@@ -302,6 +302,10 @@ export type JoinMode = (typeof JOIN_MODES)[number];
 export interface ShorthandStep {
 	agent?: string;
 	task: string;
+	/** Files to pre-read and inject before the task (pass-through to Phase.context). */
+	context?: string[];
+	/** Max characters per context file (pass-through to Phase.contextLimit). */
+	contextLimit?: number;
 }
 
 /** True when `def` is a shorthand spec (no `phases`, but a task/tasks/chain field). */
@@ -316,11 +320,22 @@ export function isShorthand(def: unknown): boolean {
 	);
 }
 
+/** Coerce an unknown value into a non-empty list of non-empty strings (or undefined). */
+function readContextList(v: unknown): string[] | undefined {
+	if (!Array.isArray(v)) return undefined;
+	const list = v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+	return list.length ? list : undefined;
+}
+
 function readStep(s: unknown): ShorthandStep {
 	if (typeof s === "string") return { task: s };
 	if (s && typeof s === "object") {
 		const o = s as Record<string, unknown>;
-		return { agent: typeof o.agent === "string" ? o.agent : undefined, task: String(o.task ?? "") };
+		const step: ShorthandStep = { agent: typeof o.agent === "string" ? o.agent : undefined, task: String(o.task ?? "") };
+		const ctx = readContextList(o.context);
+		if (ctx) step.context = ctx;
+		if (typeof o.contextLimit === "number") step.contextLimit = o.contextLimit;
+		return step;
 	}
 	return { task: "" };
 }
@@ -345,10 +360,19 @@ export function desugar(def: unknown): Taskflow {
 
 	// chain → sequential agent phases
 	if (Array.isArray(d.chain) && d.chain.length > 0) {
+		// Spec-level context in chain mode would be a flow-level default (every
+		// step), which is deliberately NOT supported — declare it per step instead.
+		if (d.context !== undefined || d.contextLimit !== undefined) {
+			console.warn(
+				"[taskflow] Shorthand chain ignores top-level 'context'/'contextLimit' — put them on individual steps instead.",
+			);
+		}
 		const steps = d.chain.map(readStep);
 		const phases: Phase[] = steps.map((s, i) => {
 			const phase: Phase = { id: `step${i + 1}`, type: "agent", task: s.task };
 			if (s.agent) phase.agent = s.agent;
+			if (s.context) phase.context = s.context;
+			if (s.contextLimit !== undefined) phase.contextLimit = s.contextLimit;
 			if (i > 0) phase.dependsOn = [`step${i}`];
 			if (i === steps.length - 1) phase.final = true;
 			return phase;
@@ -356,16 +380,30 @@ export function desugar(def: unknown): Taskflow {
 		return { name: nameOf("chain"), ...meta, phases };
 	}
 
-	// tasks → one parallel phase (fan-out + merge), no extra aggregation agent
+	// tasks → one parallel phase (fan-out + merge), no extra aggregation agent.
+	// Context is SHARED across all branches (the runtime pre-reads per phase, not
+	// per branch): spec-level context plus the union of step-level contexts.
 	if (Array.isArray(d.tasks) && d.tasks.length > 0) {
-		const branches: ParallelTask[] = d.tasks.map(readStep).map((s) => (s.agent ? { task: s.task, agent: s.agent } : { task: s.task }));
-		return { name: nameOf("parallel"), ...meta, phases: [{ id: "parallel", type: "parallel", branches, final: true }] };
+		const steps = d.tasks.map(readStep);
+		const branches: ParallelTask[] = steps.map((s) => (s.agent ? { task: s.task, agent: s.agent } : { task: s.task }));
+		const phase: Phase = { id: "parallel", type: "parallel", branches, final: true };
+		const shared = [...(readContextList(d.context) ?? []), ...steps.flatMap((s) => s.context ?? [])];
+		if (shared.length) phase.context = Array.from(new Set(shared));
+		const limits = [
+			typeof d.contextLimit === "number" ? d.contextLimit : undefined,
+			...steps.map((s) => s.contextLimit),
+		].filter((n): n is number => typeof n === "number");
+		if (limits.length) phase.contextLimit = Math.max(...limits);
+		return { name: nameOf("parallel"), ...meta, phases: [phase] };
 	}
 
-	// single task → one agent phase
+	// single task → one agent phase (the spec itself is the step)
 	if (typeof d.task === "string") {
 		const phase: Phase = { id: "main", type: "agent", task: d.task, final: true };
 		if (typeof d.agent === "string") phase.agent = d.agent;
+		const ctx = readContextList(d.context);
+		if (ctx) phase.context = ctx;
+		if (typeof d.contextLimit === "number") phase.contextLimit = d.contextLimit;
 		return { name: nameOf("task"), ...meta, phases: [phase] };
 	}
 
