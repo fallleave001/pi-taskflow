@@ -571,6 +571,25 @@ test("retry: retry:{max:0, backoffMs:0} uses DEFAULT_TRANSIENT_BACKOFF_MS for tr
 // failed upstream → downstream interpolation (M-3 interaction test)
 // ---------------------------------------------------------------------------
 
+test("budget: cost exactly equal to maxUSD completes successfully (boundary test)", async () => {
+	const def: Taskflow = {
+		name: "budget-boundary",
+		concurrency: 1,
+		phases: [
+			{ id: "p1", type: "agent", agent: "a", task: "p1" },
+			{ id: "p2", type: "agent", agent: "a", task: "p2", dependsOn: ["p1"], final: true },
+		],
+		budget: { maxUSD: 0.002 }, // exactly 2 phases × $0.001 each
+	};
+	const res = await executeTaskflow(mkState(def), baseDeps(mockRunner((t) => `ok:${t}`, { cost: 0.001 })));
+	assert.equal(res.ok, true, "cost === cap must not block the run");
+	assert.equal(res.state.status, "completed", "status must be completed when cost equals cap");
+	assert.equal(res.state.phases.p1.status, "done");
+	assert.equal(res.state.phases.p2.status, "done");
+	assert.match(res.finalOutput, /ok:p2/);
+	assert.doesNotMatch(res.finalOutput, /Budget exceeded/);
+});
+
 test("runtime: failed upstream → downstream interpolation resolves placeholder", async () => {
 	const def: Taskflow = {
 		name: "fail-interp",
