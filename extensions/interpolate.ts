@@ -123,13 +123,21 @@ export function safeParse(text: string): unknown {
 	} catch {
 		// noop
 	}
-	// Extract from a ```json fenced block
-	const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-	if (fence) {
+	// Extract from fenced blocks. Outputs often contain multiple fences
+	// (e.g. a ```typescript evidence block before the ```json payload), so try
+	// every fence — json-tagged blocks first, then untagged/other blocks.
+	const fenceRe = /```(\w*)[ \t]*\r?\n?([\s\S]*?)```/g;
+	const fenced: { lang: string; body: string }[] = [];
+	let fm: RegExpExecArray | null;
+	while ((fm = fenceRe.exec(trimmed)) !== null) {
+		fenced.push({ lang: fm[1].toLowerCase(), body: fm[2].trim() });
+	}
+	const ordered = [...fenced.filter((b) => b.lang === "json"), ...fenced.filter((b) => b.lang !== "json")];
+	for (const block of ordered) {
 		try {
-			return JSON.parse(fence[1].trim());
+			return JSON.parse(block.body);
 		} catch {
-			// noop
+			// noop — try the next fence
 		}
 	}
 	// Extract the first balanced [...] or {...}

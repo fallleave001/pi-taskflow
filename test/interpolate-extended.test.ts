@@ -446,3 +446,31 @@ test("fix-6: non-scientific bareword '1e' still fail-opens correctly", () => {
 	// The condition parser fails-open: parse error → true.
 	assert.equal(result, true, "fail-open must return true");
 });
+
+// ── dogfood-full finding: multi-fence outputs (prose + non-json fence before json fence) ──
+
+test("safeParse: json fence preferred when preceded by a non-json fence and prose with braces", () => {
+	const out = [
+		"I inspected {steps.x.output} and the schema:",
+		"```typescript",
+		"const PHASE_TYPES = [\"agent\", \"map\"];",
+		"```",
+		"Here is the result:",
+		"```json",
+		'[{"id":"claim-1","claim":"a"},{"id":"claim-2","claim":"b"}]',
+		"```",
+	].join("\n");
+	const r = safeParse(out);
+	assert.ok(Array.isArray(r), "should parse the json fence");
+	assert.equal((r as unknown[]).length, 2);
+});
+
+test("safeParse: falls back to untagged fence when no json-tagged fence parses", () => {
+	const out = "intro\n```\n{\"ok\":true}\n```\ntrailer";
+	assert.deepEqual(safeParse(out), { ok: true });
+});
+
+test("safeParse: multiple json fences — first parseable wins", () => {
+	const out = "```json\nnot json at all\n```\nmid\n```json\n[1,2,3]\n```";
+	assert.deepEqual(safeParse(out), [1, 2, 3]);
+});
