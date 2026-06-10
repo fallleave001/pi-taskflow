@@ -56,8 +56,8 @@ try {
 		agents,
 		globalThinking: settings.globalThinking,
 		persist: (s) => saveRun(s, cleanupConfig),
-		// No requestApproval — approval phases auto-reject in detached mode
-		// (fail-open: phase records the rejection, run continues).
+		// No requestApproval — approval phases auto-reject in detached/CI mode
+		// (safety: approval gates are never bypassed; the run records the rejection).
 		loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
 	});
 

@@ -143,7 +143,7 @@ deciding. The (interpolated) `task` is the prompt shown.
 - **Reject** → halt the flow (same mechanism as a blocking gate).
 - **Edit** → the typed note becomes this phase's `output`, so you can inject
   guidance mid-run: reference it downstream with `{steps.<id>.output}`.
-- **Non-interactive** runs (headless/CI/print mode) **auto-approve** and record it.
+- **Non-interactive** runs (headless/CI/print mode) **auto-reject** and record it — approval gates are safety boundaries that must never be silently bypassed.
 - **Background (detached)** runs **auto-reject** (no interactive approver) — downstream sees the rejection; the flow continues (fail-open).
 
 ```jsonc
@@ -185,9 +185,10 @@ Use hyphens in ids, never underscores. Sub-flow phases reference each other in
 their **own** `{steps.x.output}` namespace (no parent-id prefixing needed).
 
 **Fail-open & limits:** if the `def` doesn't parse, has the wrong shape, or fails
-validation, the phase fails *open* — it's marked failed with a `defError`, the
-upstream output is preserved, and the run continues (use `optional: true` on the
-flow phase so a bad plan never aborts the run). An **empty** `phases` array is a
+validation, the phase completes with `status: "done"` and carries a `defError`
+diagnostic field; downstream phases receive empty output. Authors who want a
+hard failure can add a gate that checks for `defError`. The run continues
+(add `optional: true` on the flow phase so a bad plan never aborts the run). An **empty** `phases` array is a
 valid no-op (the planner decided there's nothing to do). Inline nesting is capped
 at `MAX_DYNAMIC_NESTING` (5) to bound runaway self-spawning.
 
@@ -232,7 +233,7 @@ A `tournament` phase runs `variants` competing attempts in parallel, then a
 (`mode: "aggregate"`). Use it when one shot is unreliable and you want the best
 of several drafts, or a synthesis of diverse approaches.
 
-- `variants` — the competing attempts: a number (run the same `task` N times) or an array of `{task, agent?}` for genuinely different approaches.
+- `variants` — a number specifying how many competing variants to spawn from 'task' (default 3, max 20). For genuinely different approaches, use the `branches` field instead — an explicit array of `{task, agent?}` definitions.
 - `mode` — `"best"` (judge picks one winner, default) or `"aggregate"` (judge merges all into one output).
 - `judge` — the judge's rubric/instructions (how to choose or merge).
 - `judgeAgent` — *(optional)* the agent that runs the judge step; defaults to the phase `agent`.
@@ -465,12 +466,13 @@ Add `detach: true` to `action: "run"` to spawn the flow in a detached child proc
 
 ## Operating a run (lifecycle, resume, inspection)
 
-A run moves through: **running →** `completed` (a `final` phase produced output) **/** `blocked` (a gate emitted BLOCK, an `approval` was rejected, or the `budget` cap was hit) **/** `failed` (a non-`optional` phase errored) **/** `paused` (the run was aborted). `failed` and `paused` runs are resumable; `blocked` is terminal (fix the gate/budget and re-run).
+A run moves through: **running →** `completed` (a `final` phase produced output) **/** `blocked` (a gate emitted BLOCK, an `approval` was rejected, or the `budget` cap was hit) **/** `failed` (a non-`optional` phase errored) **/** `paused` (the run was aborted). `failed` and `paused` runs are resumable.
 
-- **Resume is cache-aware.** `action: "resume"` re-runs only what didn't finish: every phase already `done` is reused from its recorded output (within-run cache), so resuming after a crash or a `blocked`/`failed` stop never repeats completed work. A phase that was mid-flight is re-executed cleanly (stale `error`/`endedAt` are cleared first).
+- **`blocked` runs:** a blocked status halts the current run — the flow status is set to `blocked` and remaining phases are skipped. Re-running the flow resumes from the last completed state: `done` phases with matching input hashes are skipped; blocked/failed/skipped phases are re-attempted. Fix the gate condition or budget before re-running.
+- **Resume is cache-aware.** `action: "resume"` re-runs only what didn't finish: every phase already `done` is reused from its recorded output (within-run cache), so resuming after a crash or a failed/blocked stop never repeats completed work. A phase that was mid-flight is re-executed cleanly (stale `error`/`endedAt` are cleared first).
 - **When to resume vs. re-run.** Resume when the inputs are unchanged and you just want to continue/retry the tail (fixed a gate, raised the budget, approved a checkpoint). Re-run from scratch when the task or upstream inputs changed — resume would reuse now-stale outputs. (For reuse *across* runs, opt a phase into `cache: {scope:"cross-run"}` — see configuration.md.)
 - **Budget mid-run.** When the run-wide `budget` is exceeded, remaining phases are skipped and an in-flight `map`/`parallel` stops spawning new items; the run ends `blocked` with the partial outputs preserved.
-- **Inspect runs.** `/tf runs` lists recent runs with status; `/tf show <name>` prints a saved flow's definition. Run state lives at `<project .pi>/taskflows/runs/<runId>.json` (gitignored).
+- **Inspect runs.** `/tf runs` lists recent runs with status; `/tf show <name>` prints a saved flow's definition. Run state lives at `<project .pi>/taskflows/runs/<flowName>/<runId>.json` (gitignored).
 
 ## User commands
 

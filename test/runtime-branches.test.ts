@@ -58,9 +58,9 @@ function baseDeps(runTask: RuntimeDeps["runTask"], extra?: Partial<RuntimeDeps>)
 // APPROVAL PHASES
 // ════════════════════════════════════════════════════════════════════
 
-test("approval: auto-approves when no requestApproval callback is provided", async () => {
+test("approval: auto-rejects when no requestApproval callback is provided", async () => {
 	const def: Taskflow = {
-		name: "auto-approve",
+		name: "auto-reject",
 		phases: [
 			{ id: "gate", type: "approval", task: "Approve to continue?" },
 			{ id: "work", type: "agent", agent: "a", task: "do {steps.gate.output}", dependsOn: ["gate"], final: true },
@@ -68,10 +68,12 @@ test("approval: auto-approves when no requestApproval callback is provided", asy
 	};
 	const deps = baseDeps(mockRunner((t) => `done:${t}`));
 	const res = await executeTaskflow(mkState(def), deps);
-	assert.equal(res.ok, true);
-	assert.equal(res.state.phases.gate.approval?.decision, "approve");
+	// Headless runs auto-reject (safety: approval gates must not be bypassed)
+	assert.equal(res.state.phases.gate.approval?.decision, "reject");
 	assert.equal(res.state.phases.gate.approval?.auto, true);
-	assert.match(res.state.phases.gate.output ?? "", /auto-approved/);
+	assert.match(res.state.phases.gate.output ?? "", /auto-rejected/);
+	assert.equal(res.state.phases.gate.gate?.verdict, "block");
+	assert.equal(res.state.status, "blocked");
 });
 
 test("approval: interactive approve continues the flow", async () => {

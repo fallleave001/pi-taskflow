@@ -13,8 +13,8 @@ import { Type, type Static } from "typebox";
 // Phase types
 // ---------------------------------------------------------------------------
 
-export const PHASE_TYPES = ["agent", "parallel", "map", "gate", "reduce", "approval", "flow", "loop", "tournament"] as const;
-export type PhaseType = (typeof PHASE_TYPES)[number];
+const PHASE_TYPES = ["agent", "parallel", "map", "gate", "reduce", "approval", "flow", "loop", "tournament"] as const;
+type PhaseType = (typeof PHASE_TYPES)[number];
 
 /** Loop iteration bounds. Authors may lower the max; the hard cap is a runaway guard. */
 export const LOOP_DEFAULT_MAX_ITERATIONS = 10;
@@ -36,17 +36,18 @@ export const MAX_DYNAMIC_CONCURRENCY = 16;
 /** Tournament competitor bounds. */
 export const TOURNAMENT_DEFAULT_VARIANTS = 3;
 export const TOURNAMENT_HARD_MAX_VARIANTS = 20;
-export const TOURNAMENT_MODES = ["best", "aggregate"] as const;
+const TOURNAMENT_MODES = ["best", "aggregate"] as const;
+/** @internal */
 export type TournamentMode = (typeof TOURNAMENT_MODES)[number];
 
-export const OUTPUT_FORMATS = ["text", "json"] as const;
-export const JOIN_MODES = ["all", "any"] as const;
-export const CACHE_SCOPES = ["run-only", "cross-run", "off"] as const;
+const OUTPUT_FORMATS = ["text", "json"] as const;
+const JOIN_MODES = ["all", "any"] as const;
+const CACHE_SCOPES = ["run-only", "cross-run", "off"] as const;
 export type CacheScope = (typeof CACHE_SCOPES)[number];
 /** Allowed fingerprint entry prefixes. `glob!:` = content-hash variant of `glob:`. */
-export const CACHE_FINGERPRINT_PREFIXES = ["git:", "glob:", "glob!:", "file:", "env:"] as const;
+const CACHE_FINGERPRINT_PREFIXES = ["git:", "glob:", "glob!:", "file:", "env:"] as const;
 /** Phase types that must NOT be cached across runs (a fresh result is required each run). */
-export const CACHE_CROSS_RUN_BLOCKED_TYPES = ["gate", "approval", "loop", "tournament"] as const;
+const CACHE_CROSS_RUN_BLOCKED_TYPES = ["gate", "approval", "loop", "tournament"] as const;
 
 const ParallelTaskSchema = Type.Object(
 	{
@@ -282,7 +283,7 @@ export type ArgSpec = Static<typeof ArgSpecSchema>;
 export type RetryPolicy = Static<typeof RetrySchema>;
 export type Budget = Static<typeof BudgetSchema>;
 export type CachePolicy = Static<typeof CacheSchema>;
-export type JoinMode = (typeof JOIN_MODES)[number];
+type JoinMode = (typeof JOIN_MODES)[number];
 
 // ---------------------------------------------------------------------------
 // Shorthand (non-DAG) specs — subagent-style ergonomics
@@ -414,6 +415,7 @@ export function desugar(def: unknown): Taskflow {
 // Validation (beyond schema: DAG integrity, phase-type requirements)
 // ---------------------------------------------------------------------------
 
+/** @internal */
 export interface ValidationResult {
 	ok: boolean;
 	errors: string[];
@@ -656,16 +658,41 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 	// placeholder string. The runtime can't infer the intent — fail fast at
 	// validation time so the mistake is caught before the run starts.
 	//
+	// The check uses TRANSITIVE ancestors: if phase B depends on A, and C depends
+	// on B, then C may reference {steps.A.*} transitively. Only truly unreachable
+	// refs are errors.
+	//
 	// Phases with `join: "any"` are exempt: by design they only need ONE of
 	// their declared deps to complete, and may reference other phases as
 	// informational context (not as true dependencies).
 	if (errors.length === 0) {
 		const idToPhase = new Map((flow.phases as Phase[]).map((p) => [p.id, p]));
+		// Precompute transitive ancestors for every phase via BFS over dependsOn.
+		const transitiveCache = new Map<string, Set<string>>();
+		const transitiveAncestors = (phaseId: string): Set<string> => {
+			const cached = transitiveCache.get(phaseId);
+			if (cached) return cached;
+			const result = new Set<string>();
+			const queue = [...(idToPhase.get(phaseId)?.dependsOn ?? []), ...(idToPhase.get(phaseId)?.from ?? [])];
+			while (queue.length) {
+				const id = queue.shift()!;
+				if (result.has(id)) continue;
+				result.add(id);
+				const dep = idToPhase.get(id);
+				if (dep) {
+					for (const d of [...(dep.dependsOn ?? []), ...(dep.from ?? [])]) {
+						if (!result.has(d)) queue.push(d);
+					}
+				}
+			}
+			transitiveCache.set(phaseId, result);
+			return result;
+		};
 		for (const p of flow.phases as Phase[]) {
 			if (!p?.id) continue;
 			const isJoinAny = p.join === "any";
 			if (isJoinAny) continue;
-			const deps = new Set(dependenciesOf(p));
+			const transitive = transitiveAncestors(p.id);
 			const refs = collectRefs(p);
 			for (const ref of refs.steps) {
 				if (ref === p.id) {
@@ -678,9 +705,9 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 					// double-warn — the dependsOn loop above already flags it.
 					continue;
 				}
-				if (!deps.has(ref)) {
+				if (!transitive.has(ref)) {
 					errors.push(
-						`Phase '${p.id}': task references {steps.${ref}.*} but '${ref}' is not in dependsOn. ` +
+						`Phase '${p.id}': task references {steps.${ref}.*} but '${ref}' is not reachable via dependsOn. ` +
 							`The phase will run in parallel with '${ref}' and see the literal placeholder. ` +
 							`Add "dependsOn": ["${ref}"] (or include '${ref}' transitively).`,
 					);

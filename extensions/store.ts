@@ -29,6 +29,7 @@ export interface SavedFlow {
 	def: Taskflow;
 }
 
+/** @internal */
 export type PhaseStatus = "pending" | "running" | "done" | "failed" | "skipped";
 
 export interface PhaseState {

@@ -74,6 +74,7 @@ export interface AgentConfig {
 	filePath: string;
 }
 
+/** @internal */
 export interface AgentDiscoveryResult {
 	agents: AgentConfig[];
 	projectAgentsDir: string | null;
@@ -224,7 +225,13 @@ export interface SubagentSettings {
  * E.g. `{{fast}}` → `openrouter/deepseek/deepseek-v4-flash` if modelRoles.fast is set.
  * Returns undefined if the value is not a role reference or the role is unmapped.
  */
-export function resolveModelRole(model: string | undefined, roles?: Record<string, string>): string | undefined {
+/**
+ * Resolve `{{roleName}}` model references against a role→model mapping.
+ * E.g. `{{fast}}` → `openrouter/deepseek/deepseek-v4-flash` if modelRoles.fast is set.
+ * Returns undefined if the value is not a role reference or the role is unmapped.
+ * @internal
+ */
+function resolveModelRole(model: string | undefined, roles?: Record<string, string>): string | undefined {
 	if (!model || !roles) return model;
 	const match = model.match(/^\{\{(\w+)\}\}$/);
 	if (!match) return model;

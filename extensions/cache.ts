@@ -135,6 +135,7 @@ export function resolveFingerprint(entries: string[] | undefined, cwd: string): 
 // Cross-run cache store
 // ---------------------------------------------------------------------------
 
+/** @internal */
 export interface CacheEntry {
 	/** The full cache key (== phase inputHash incl. fingerprint). */
 	key: string;

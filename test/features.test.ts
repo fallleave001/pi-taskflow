@@ -286,7 +286,7 @@ test("optional: a failed optional dependency does not abort the run", async () =
 // approval (human-in-the-loop)
 // ---------------------------------------------------------------------------
 
-test("approval: auto-approves when no interactive approver is available", async () => {
+test("approval: auto-rejects when no interactive approver is available", async () => {
 	const def: Taskflow = {
 		name: "appr-auto",
 		phases: [
@@ -296,11 +296,12 @@ test("approval: auto-approves when no interactive approver is available", async 
 		],
 	};
 	const res = await executeTaskflow(mkState(def), baseDeps(mockRunner((t) => `r:${t}`)));
-	assert.equal(res.ok, true);
-	assert.equal(res.state.phases.ok.status, "done");
-	assert.equal(res.state.phases.ok.approval?.decision, "approve");
+	// Headless/CI runs auto-reject (safety: approval gates must not be bypassed)
+	assert.equal(res.state.phases.ok.approval?.decision, "reject");
 	assert.equal(res.state.phases.ok.approval?.auto, true);
-	assert.equal(res.state.phases.ship.status, "done");
+	assert.equal(res.state.phases.ok.gate?.verdict, "block");
+	assert.equal(res.state.status, "blocked");
+	assert.equal(res.state.phases.ship.status, "skipped");
 });
 
 test("approval: rejection halts the flow", async () => {

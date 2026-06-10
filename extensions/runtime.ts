@@ -47,7 +47,7 @@ export interface RuntimeDeps {
 	onProgress?: (state: RunState) => void;
 	/** Injectable task runner (defaults to spawning a real subagent). Enables testing. */
 	runTask?: typeof runAgentTask;
-	/** Resolve an `approval` phase. Omit for non-interactive runs (auto-approve). */
+	/** Resolve an `approval` phase. Omit for non-interactive runs (auto-reject). */
 	requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
 	/** Resolve a saved taskflow by name for `flow` (sub-workflow) phases. */
 	loadFlow?: (name: string) => Taskflow | undefined;
@@ -701,13 +701,16 @@ async function executePhase(
 		const cached = cachedPhase(cc, inputHash);
 		if (cached) return cached;
 
-		// Non-interactive (headless/CI/tests): auto-approve, fail-open, but record it.
+		// Non-interactive (headless/CI/detached): auto-REJECT, fail-open, but record it.
+		// Approval gates are safety boundaries — bypassing them silently in CI would
+		// let unreviewed work ship. Detached/CI runs must not bypass approval gates.
 		if (!deps.requestApproval) {
 			return {
 				id: phase.id,
 				status: "done",
-				output: "(auto-approved: no interactive approver available)",
-				approval: { decision: "approve", auto: true },
+				output: "(auto-rejected: no interactive approver available)",
+				approval: { decision: "reject", auto: true },
+				gate: { verdict: "block", reason: "(auto-rejected: no interactive approver available)" },
 				usage: emptyUsage(),
 				inputHash,
 				endedAt: Date.now(),

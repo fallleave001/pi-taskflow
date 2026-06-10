@@ -140,7 +140,7 @@ test("finalPhase: explicit final, else last", () => {
 	assert.equal(finalPhase(noFinal).id, "b");
 });
 
-test("validateTaskflow: errors when {steps.X} is referenced but X is not in dependsOn", () => {
+test("validateTaskflow: errors when {steps.X} is referenced but X is not reachable via dependsOn", () => {
 	// The jiuyang-full-pipeline anti-pattern: the task talks about
 	// {steps.code-review-1.output} but the phase has no dependsOn, so it runs
 	// in parallel with code-review-1 and the model sees the literal placeholder.
@@ -156,9 +156,39 @@ test("validateTaskflow: errors when {steps.X} is referenced but X is not in depe
 	};
 	const r = validateTaskflow(def);
 	assert.equal(r.ok, false, "missing dependsOn is now a hard validation error");
-	assert.equal(r.errors.length, 2, "two undeclared refs");
-	assert.match(r.errors[0], /Phase 'fix-issues'.*'code-review-1'.*not in dependsOn/);
-	assert.match(r.errors[1], /Phase 'code-review-2'.*'fix-issues'.*not in dependsOn/);
+	assert.equal(r.errors.length, 2, "two unreachable refs");
+	assert.match(r.errors[0], /Phase 'fix-issues'.*'code-review-1'.*not reachable/);
+	assert.match(r.errors[1], /Phase 'code-review-2'.*'fix-issues'.*not reachable/);
+});
+
+test("validateTaskflow: transitive ancestor is accepted (no false-positive)", () => {
+	// B depends on A, C depends on B — C may reference {steps.A.*}
+	const def = {
+		name: "transitive-ok",
+		phases: [
+			{ id: "a", type: "agent", task: "discover", output: "json" },
+			{ id: "b", type: "agent", task: "work", dependsOn: ["a"] },
+			{ id: "c", type: "agent", task: "use {steps.a.output} and {steps.b.output}", dependsOn: ["b"], final: true },
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, true, `transitive ancestor should be accepted: ${r.errors.join("; ")}`);
+	assert.equal(r.errors.length, 0);
+});
+
+test("validateTaskflow: unreachable ref still errors (not a transitive ancestor)", () => {
+	const def = {
+		name: "unreachable-ref",
+		phases: [
+			{ id: "a", type: "agent", task: "do A" },
+			{ id: "b", type: "agent", task: "do B" },
+			{ id: "c", type: "agent", task: "use {steps.a.output}", dependsOn: ["b"], final: true },
+		],
+	};
+	const r = validateTaskflow(def);
+	assert.equal(r.ok, false, "unreachable ref must still error");
+	assert.equal(r.errors.length, 1);
+	assert.match(r.errors[0], /Phase 'c'.*'a'.*not reachable/);
 });
 
 test("validateTaskflow: join:'any' is exempt from dependsOn-ref check", () => {
@@ -217,7 +247,7 @@ test("validateTaskflow: errors also catch refs in map/parallel branches and over
 	const r = validateTaskflow(def);
 	assert.equal(r.ok, false, "missing dependsOn for {steps.X} in `over` is a hard error");
 	assert.equal(r.errors.length, 1);
-	assert.match(r.errors[0], /'work'.*'list'/);
+	assert.match(r.errors[0], /'work'.*'list'.*not reachable/);
 });
 
 test("validateTaskflow: errors also catch refs in when and flow.with", () => {
@@ -232,8 +262,8 @@ test("validateTaskflow: errors also catch refs in when and flow.with", () => {
 	const r = validateTaskflow(def);
 	assert.equal(r.ok, false, "missing dependsOn for {steps.X} in `when`/`flow.with` is a hard error");
 	assert.equal(r.errors.length, 2);
-	assert.match(r.errors[0], /'ship'.*'plan'/);
-	assert.match(r.errors[1], /'sub'.*'plan'/);
+	assert.match(r.errors[0], /'ship'.*'plan'.*not reachable/);
+	assert.match(r.errors[1], /'sub'.*'plan'.*not reachable/);
 });
 
 test("validateTaskflow: invocation warnings catch missing args and cwd/codebase mismatch", () => {

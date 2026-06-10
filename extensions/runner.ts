@@ -69,7 +69,7 @@ export interface RunOptions {
  * 5 minutes is generous enough for slow reasoning/long tool calls while still
  * bounding a true hang.
  */
-export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 
 export function isFailed(r: RunResult): boolean {
 	return r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";

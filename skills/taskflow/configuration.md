@@ -286,7 +286,7 @@ for the design.
 ### `ttl` (cross-run only)
 
 Max age before a cross-run hit is treated as a miss: e.g. `"30m"`, `"6h"`, `"7d"`.
-Omit for no time bound. A hit older than the TTL re-executes the phase.
+Omit for no time bound. A hit older than the TTL re-executes the phase. Cross-run cache entries are hard-evicted after 90 days regardless of per-entry TTL. This ceiling is not configurable.
 
 ### `fingerprint` (cross-run only)
 
@@ -298,7 +298,7 @@ Each entry is one of:
 | Entry | Becomes a miss when… | Resolves to |
 |-------|----------------------|-------------|
 | `git:HEAD` / `git:<ref>` | the commit moves | the resolved SHA (30s timeout → `<timeout>`; no git → `<no-git>`) |
-| `glob:<pattern>` | the **set of matching paths** changes | sorted path list (mtime-free) |
+| `glob:<pattern>` | the **set of matching paths** or their metadata changes | sorted path list with size + mtime (content-hashed globs use `glob!:` instead, which is mtime-independent) |
 | `glob!:<pattern>` | the **contents** of matching files change | content hashes (capped at 5000 matches) |
 | `file:<path>` | that file's content changes | sha256 of the file (>10 MB or missing → `<skip>`/`<missing>`) |
 | `env:<NAME>` | the env var changes | the env value |
@@ -333,7 +333,7 @@ Each entry is one of:
 |------|------|---------|
 | User-scoped flow | `~/.pi/agent/taskflows/<name>.json` | personal |
 | Project-scoped flow | `<nearest .pi>/taskflows/<name>.json` | ✅ commit to share |
-| Run state (resume) | `<project .pi>/taskflows/runs/<runId>.json` | ❌ gitignore |
+| Run state (resume) | `<project .pi>/taskflows/runs/<flowName>/<runId>.json` | ❌ gitignore |
 
 - `action: "save"` takes `scope: "project"` (default) or `"user"`.
 - Saved flows auto-register as `/tf:<name>` (immediately for the current session,
