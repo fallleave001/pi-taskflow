@@ -50,7 +50,7 @@ Keys of each object in `phases[]`. Some only apply to specific `type`s.
 ```jsonc
 {
   "id": "audit",            // required, unique — referenced via {steps.audit.output}
-  "type": "map",            // agent | parallel | map | gate | reduce (default: agent)
+  "type": "map",            // agent | parallel | map | gate | reduce | approval | flow | loop | tournament (default: agent)
   "agent": "analyst",       // agent name to run this phase
   "task": "Audit {item.route}…",
   "dependsOn": ["discover"],// DAG edges
@@ -71,7 +71,7 @@ Keys of each object in `phases[]`. Some only apply to specific `type`s.
 | Key | Applies to | Default | Notes |
 |-----|-----------|---------|-------|
 | `id` | all | — | **Required, unique.** Used in `{steps.<id>…}`. |
-| `type` | all | `agent` | One of the 5 phase types. |
+| `type` | all | `agent` | One of the 9 phase types (agent, parallel, map, gate, reduce, approval, flow, loop, tournament). |
 | `agent` | all | first available | Agent name; resolved from the scoped pool. |
 | `task` | agent, gate, map, reduce | — | Prompt; supports interpolation. Required for these types. |
 | `over` | map | — | **Required for map.** Must resolve to an array. |

@@ -79,17 +79,17 @@ Call the `taskflow` tool. To run a brand-new flow you write inline, pass
 
 ### Phase types
 
-| type | meaning |
-|------|---------|
-| `agent` | one subagent runs `task` |
-| `parallel` | run `branches[]` concurrently |
-| `map` | fan out over `over` (an array) — one subagent per item, `{item}` bound |
-| `gate` | quality/review step that can **halt the flow** (see below) |
-| `reduce` | aggregate `from[]` phases into one output |
-| `approval` | **human-in-the-loop** pause: ask a person to approve / reject / edit before continuing |
-| `flow` | run a **sub-flow** as one phase — **saved** (`use`) or **runtime-generated** (`def`) |
-| `loop` | repeat a body until a condition / convergence / `maxIterations` (see below) |
-| `tournament` | run N competing `variants`, a `judge` picks the best or aggregates (see below) |
+| type | meaning | details |
+|------|---------|---------|
+| `agent` | one subagent runs `task` | DSL shape |
+| `parallel` | run `branches[]` concurrently | Conditional routing |
+| `map` | fan out over `over` (an array) — one subagent per item, `{item}` bound | DSL shape |
+| `gate` | quality/review step that can **halt the flow** | Gate phases |
+| `reduce` | aggregate `from[]` phases into one output | DSL shape |
+| `approval` | **human-in-the-loop** pause: ask a person to approve / reject / edit before continuing | Approval phases |
+| `flow` | run a **sub-flow** as one phase — **saved** (`use`) or **runtime-generated** (`def`) | Sub-flows |
+| `loop` | repeat a body until a condition / convergence / `maxIterations` | Loop phases |
+| `tournament` | run N competing `variants`, a `judge` picks the best or aggregates | Tournament phases |
 
 ### Control-flow fields (any phase)
 
@@ -434,10 +434,19 @@ Quick reference:
 
 ## Actions
 
-- `action: "run"` — run inline `define` or a saved `name` (with optional `args`).
-- `action: "save"` — persist `define` (scope `project` or `user`); becomes `/tf:<name>`.
-- `action: "resume"` — continue a paused/failed run by `runId` (completed phases are cached).
-- `action: "list"` — list saved flows.
+- `action: "run"` — run an inline `define` (a one-off DAG) **or** a saved `name` (with optional `args`). Use `define` for an ad-hoc flow; use `name` to invoke something previously saved.
+- `action: "save"` — persist `define` (scope `project` — default, committed/shared — or `user`); it becomes `/tf:<name>`. On a name collision, project overrides user.
+- `action: "resume"` — continue a paused/failed run by `runId`.
+- `action: "list"` — list saved flows. `action: "verify"` — static-check a `define` (zero tokens). `action: "agents"` — list available agents.
+
+## Operating a run (lifecycle, resume, inspection)
+
+A run moves through: **running →** `completed` (a `final` phase produced output) **/** `blocked` (a gate emitted BLOCK, an `approval` was rejected, or the `budget` cap was hit) **/** `failed` (a non-`optional` phase errored) **/** `paused` (the run was aborted). `failed` and `paused` runs are resumable; `blocked` is terminal (fix the gate/budget and re-run).
+
+- **Resume is cache-aware.** `action: "resume"` re-runs only what didn't finish: every phase already `done` is reused from its recorded output (within-run cache), so resuming after a crash or a `blocked`/`failed` stop never repeats completed work. A phase that was mid-flight is re-executed cleanly (stale `error`/`endedAt` are cleared first).
+- **When to resume vs. re-run.** Resume when the inputs are unchanged and you just want to continue/retry the tail (fixed a gate, raised the budget, approved a checkpoint). Re-run from scratch when the task or upstream inputs changed — resume would reuse now-stale outputs. (For reuse *across* runs, opt a phase into `cache: {scope:"cross-run"}` — see configuration.md.)
+- **Budget mid-run.** When the run-wide `budget` is exceeded, remaining phases are skipped and an in-flight `map`/`parallel` stops spawning new items; the run ends `blocked` with the partial outputs preserved.
+- **Inspect runs.** `/tf runs` lists recent runs with status; `/tf show <name>` prints a saved flow's definition. Run state lives at `<project .pi>/taskflows/runs/<runId>.json` (gitignored).
 
 ## User commands
 
