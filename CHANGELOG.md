@@ -2,6 +2,18 @@
 
 All notable changes to pi-taskflow are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.0.19] — 2026-06-10
+
+### Documentation
+- **Closed the SKILL coverage gap — the LLM can now author every shipped feature.** A schema-vs-SKILL.md audit (`docs/internal/skill-coverage-audit.md`, machine-checked + cross-adversarial reviewed) found several implemented + tested features that were undocumented in the LLM-facing skill, so the model never generated them. All ~46 user-facing schema fields are now documented across SKILL.md + configuration.md.
+  - **SKILL.md**: phase-type table now lists all 9 types (added `loop`, `tournament`) with a “details” column pointing each to its section; new **Loop phases** (`until`/`maxIterations`/`convergence`) and **Tournament phases** (`variants`/`judge`/`mode`/`judgeAgent`) sections; `eval` (zero-token machine gate) and `onBlock: "retry"` (self-healing rework loop) folded into the Gate section; cross-run `cache` pointer + `optional` + static `branches` notes.
+  - **SKILL.md**: new **Operating a run** section — run lifecycle (`running → completed/blocked/failed/paused`), cache-aware resume, when to resume vs. re-run, budget-mid-run behavior, and run inspection. Clarified action semantics (`define` vs `name`, save scope/collision, `verify`/`agents` actions).
+  - **configuration.md**: new **§2.1 Context pre-reading** (`context`/`contextLimit` — resolution order, per-file 8000-char cap, 200k total cap) and **§8 Cross-run caching** (`cache.scope`, `ttl`, full `fingerprint` prefix table for git/glob/glob!/file/env). Fixed a stale “5 phase types” → 9 cross-file drift.
+- Every documented JSON example validates against the live schema; all run-status/resume claims verified against the runtime (`blocked` is terminal; `paused`/`failed` are resumable). 560 tests pass, zero regression.
+
+### CI
+- GitHub Packages publish is now best-effort (`continue-on-error`) so an unscoped-package 404 there can never block the npm publish or the GitHub Release.
+
 ## [0.0.18] — 2026-06-09
 
 ### Added
