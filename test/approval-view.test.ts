@@ -6,7 +6,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 /** Identity theme — strips styling so assertions see plain structure. */
 const theme: any = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
-function mk(upstream?: string, rows = 24, term?: { write(data: string): void }) {
+function mk(upstream?: string, rows = 24) {
 	let result: ApprovalChoice | undefined;
 	const view = new ApprovalViewComponent(
 		theme,
@@ -15,7 +15,6 @@ function mk(upstream?: string, rows = 24, term?: { write(data: string): void }) 
 			result = c;
 		},
 		() => rows,
-		term,
 	);
 	return { view, result: () => result };
 }
@@ -69,26 +68,6 @@ test("approval-view: down/pageDown/end scroll the viewport", () => {
 	assert.match(text, /line-0 /, "Home jumps back to the top");
 });
 
-test("approval-view: SGR mouse wheel scrolls the viewport", () => {
-	const upstream = Array.from({ length: 100 }, (_, i) => `line-${i}`).join("\n");
-	const { view } = mk(upstream, 24);
-	view.render(80);
-	view.handleInput("\u001b[<65;10;5M"); // wheel down
-	let text = view.render(80).join("\n");
-	assert.match(text, /↑3 more/, "wheel down scrolls 3 lines");
-	view.handleInput("\u001b[<64;10;5M"); // wheel up
-	text = view.render(80).join("\n");
-	assert.match(text, /line-0 /, "wheel up scrolls back to top");
-});
-
-test("approval-view: mouse clicks are swallowed (no accidental decision)", () => {
-	const { view, result } = mk("x");
-	view.render(80);
-	view.handleInput("\u001b[<0;10;5M"); // left button press
-	view.handleInput("\u001b[<0;10;5m"); // left button release
-	assert.equal(result(), undefined, "clicks do not trigger a decision");
-});
-
 test("approval-view: decisions — enter approves, e edits, esc rejects", () => {
 	{
 		const { view, result } = mk("x");
@@ -128,58 +107,19 @@ test("approval-view: decision fires only once", () => {
 	assert.equal(calls, 1, "subsequent inputs after a decision are ignored");
 });
 
-test("approval-view: enables mouse reporting on create and restores on dispose", () => {
-	const writes: string[] = [];
-	const term = { write: (d: string) => writes.push(d) };
-	const { view } = mk("x", 24, term);
-	assert.ok(
-		writes.some((w) => w.includes("\u001b[?1000h") && w.includes("\u001b[?1006h")),
-		"mouse tracking enabled",
-	);
+test("approval-view: dispose is a safe no-op (no mouse tracking)", () => {
+	const { view } = mk("x");
 	view.dispose();
-	assert.ok(
-		writes.some((w) => w.includes("\u001b[?1000l") && w.includes("\u001b[?1006l")),
-		"mouse tracking restored",
-	);
 	view.dispose();
-	const offs = writes.filter((w) => w.includes("\u001b[?1000l"));
-	assert.equal(offs.length, 1, "dispose is idempotent");
-});
-
-test("approval-view: deciding restores mouse state before the callback fires", () => {
-	const writes: string[] = [];
-	const term = { write: (d: string) => writes.push(d) };
-	let mouseOffBeforeDone = false;
-	const view = new ApprovalViewComponent(
-		theme,
-		{ title: "t", message: "m" },
-		() => {
-			mouseOffBeforeDone = writes.some((w) => w.includes("\u001b[?1000l"));
-		},
-		() => 24,
-		term,
-	);
-	view.handleInput("\r");
-	assert.ok(mouseOffBeforeDone, "mouse reporting disabled before onDone runs");
-});
-
-test("approval-view: throwing terminal writer is tolerated", () => {
-	const term = {
-		write: () => {
-			throw new Error("closed stream");
-		},
-	};
-	const { view, result } = mk("x", 24, term);
-	view.render(80);
-	view.handleInput("\r");
-	assert.equal(result(), "approve");
+	// Idempotent, never throws
+	assert.ok(true);
 });
 
 test("approval-view: no upstream → no scroll hint, no scroll indicator", () => {
 	const { view } = mk(undefined);
 	const text = view.render(80).join("\n");
 	assert.doesNotMatch(text, /more/, "no scroll indicator without body");
-	assert.doesNotMatch(text, /PgUp/, "no scroll hint without overflow");
+	assert.doesNotMatch(text, /scroll/, "no scroll hint without overflow");
 });
 
 test("approval-view: short upstream fits without scroll indicator", () => {

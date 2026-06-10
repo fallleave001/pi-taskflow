@@ -6,11 +6,15 @@
  * before deciding. Every line is padded to the full dialog width so the
  * overlay composites cleanly (no see-through, no ghosting in scrollback).
  *
- * While the dialog is open, SGR mouse reporting is enabled so the wheel
- * scrolls the viewport instead of the terminal scrollback. It is restored
- * on dispose.
+ * Mouse tracking is intentionally NOT used here. Enabling terminal-level
+ * SGR mouse reporting (DECSET 1000h/1006h) to capture wheel events would
+ * interfere with the terminal's native scrollback after the dialog closes,
+ * because the restore sequence depends on the overlay framework reliably
+ * calling dispose — which is not guaranteed across all lifecycle paths.
+ * Keyboard scrolling (↑↓/PgUp/PgDn/Home/End/j/k/g/G) covers the same
+ * ground without risking a stuck mouse-tracking mode.
  *
- * Keys: wheel/↑↓ scroll · PgUp/PgDn page · Home/End jump ·
+ * Keys: ↑↓ scroll · PgUp/PgDn page · Home/End jump ·
  *       a/Enter approve · e edit (guidance) · r/Esc reject.
  */
 
@@ -28,31 +32,16 @@ export interface ApprovalViewOptions {
 	upstream?: string;
 }
 
-/** Minimal writer used to toggle terminal mouse reporting. */
-export interface TerminalWriter {
-	write(data: string): void;
-}
-
 const FALLBACK_ROWS = 24;
-/** Wheel ticks scroll this many lines. */
-const WHEEL_STEP = 3;
-/** SGR mouse sequence: ESC [ < B ; X ; Y (M|m) */
-const MOUSE_SGR = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
-/** Enable basic mouse tracking + SGR encoding. */
-const MOUSE_ON = "\x1b[?1000h\x1b[?1006h";
-/** Restore: disable SGR encoding + mouse tracking. */
-const MOUSE_OFF = "\x1b[?1006l\x1b[?1000l";
 
 export class ApprovalViewComponent {
 	private theme: Theme;
 	private opts: ApprovalViewOptions;
 	private onDone: (choice: ApprovalChoice) => void;
 	private getRows: () => number;
-	private term?: TerminalWriter;
 	private scrollOffset = 0;
 	private cachedWidth?: number;
 	private cachedBody?: string[];
-	private mouseEnabled = false;
 	private decided = false;
 
 	constructor(
@@ -60,43 +49,19 @@ export class ApprovalViewComponent {
 		opts: ApprovalViewOptions,
 		onDone: (choice: ApprovalChoice) => void,
 		getRows?: () => number,
-		term?: TerminalWriter,
 	) {
 		this.theme = theme;
 		this.opts = opts;
 		this.onDone = onDone;
 		this.getRows = getRows ?? (() => FALLBACK_ROWS);
-		this.term = term;
-		this.enableMouse();
 	}
 
-	private enableMouse(): void {
-		if (this.term && !this.mouseEnabled) {
-			try {
-				this.term.write(MOUSE_ON);
-				this.mouseEnabled = true;
-			} catch {
-				// non-tty / closed stream — wheel support is best-effort
-			}
-		}
-	}
-
-	/** Restore terminal mouse state. Idempotent; call from the overlay's dispose. */
-	dispose(): void {
-		if (this.term && this.mouseEnabled) {
-			this.mouseEnabled = false;
-			try {
-				this.term.write(MOUSE_OFF);
-			} catch {
-				// ignore
-			}
-		}
-	}
+	/** No-op — kept for compatibility with Pi TUI overlay dispose contract. */
+	dispose(): void {}
 
 	private decide(choice: ApprovalChoice): void {
 		if (this.decided) return;
 		this.decided = true;
-		this.dispose();
 		this.onDone(choice);
 	}
 
@@ -155,17 +120,6 @@ export class ApprovalViewComponent {
 	}
 
 	handleInput(data: string): void {
-		// Mouse events (SGR) — wheel scrolls, everything else is swallowed.
-		const mouse = MOUSE_SGR.exec(data);
-		if (mouse) {
-			const b = Number(mouse[1]);
-			if (b & 64) {
-				// Wheel: low two bits 0 = up, 1 = down.
-				if ((b & 3) === 0) this.clampScroll(-WHEEL_STEP);
-				else if ((b & 3) === 1) this.clampScroll(WHEEL_STEP);
-			}
-			return;
-		}
 		// Decisions
 		if (matchesKey(data, "return") || data === "a" || data === "y") {
 			this.decide("approve");
@@ -251,7 +205,7 @@ export class ApprovalViewComponent {
 
 		// Key hints
 		lines.push(this.hrule(width, "├", "┤"));
-		const scrollHint = cap > 0 ? "wheel/↑↓/PgUp/PgDn scroll · " : "";
+		const scrollHint = cap > 0 ? "↑↓/PgUp/PgDn scroll · " : "";
 		lines.push(this.row(th.fg("dim", `${scrollHint}a/Enter approve · e edit · r/Esc reject`), width));
 		lines.push(this.hrule(width, "╰", "╯"));
 		return lines;

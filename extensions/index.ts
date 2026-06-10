@@ -206,7 +206,6 @@ async function runFlow(
 							},
 							done,
 							() => tui.terminal.rows,
-							tui.terminal,
 						);
 						const onAbort = () => done("reject");
 						signal?.addEventListener("abort", onAbort, { once: true });
