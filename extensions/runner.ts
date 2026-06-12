@@ -60,6 +60,14 @@ export interface RunOptions {
 	 * the prior behaviour (no idle timeout). Defaults to DEFAULT_IDLE_TIMEOUT_MS.
 	 */
 	idleTimeoutMs?: number;
+	/**
+	 * Shared Context Tree (opt-in). When set, the spawned subagent receives
+	 * PI_TASKFLOW_CTX_DIR + PI_TASKFLOW_NODE_ID in its environment and is loaded
+	 * with this extension via `--extension`, so it can register the ctx_* tools
+	 * (read/write/report/spawn) that read & write the per-run blackboard.
+	 */
+	ctxDir?: string;
+	nodeId?: string;
 }
 
 /**
@@ -70,6 +78,41 @@ export interface RunOptions {
  * bounding a true hang.
  */
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
+
+/** The Shared Context Tree tool names a subagent may call when sharing is on. */
+export const CTX_TOOL_NAMES = ["ctx_read", "ctx_write", "ctx_report", "ctx_spawn"] as const;
+
+/**
+ * Guidance appended to a subagent's system prompt when the Shared Context Tree
+ * is enabled for its phase. Registering the ctx_* tools makes them AVAILABLE;
+ * this block is what makes the model actually USE them with the right discipline
+ * (read-before-you-explore; publish reusable findings; report up; delegate when
+ * work fans out). Kept short and imperative on purpose.
+ */
+export const CTX_TOOLS_GUIDANCE = [
+	"## Shared Context Tree (you are part of a coordinated team of agents)",
+	"",
+	"You are one agent in a tree working a shared goal, with a shared blackboard",
+	"and an upward report channel. Use these tools deliberately \u2014 they save tokens",
+	"and prevent the team from duplicating work:",
+	"",
+	"- ctx_read(key?): BEFORE exploring the codebase or re-reading files, call",
+	"  ctx_read with no arguments to see what teammates already discovered. If a",
+	"  finding you need already exists, REUSE it instead of re-deriving it.",
+	"- ctx_write(key, value): when you discover something other agents will likely",
+	"  need (a file map, an endpoint list, an interface, a config value), publish it",
+	"  under a short key (e.g. 'endpoints', 'db.schema'). Keep values concise and",
+	"  structured (JSON) so others can consume them directly.",
+	"- ctx_report(summary, structured?): when you finish, report your result upward",
+	"  so the parent task and downstream steps can see it. Lead with the outcome.",
+	"- ctx_spawn(assignments[]): if you discover the work should fan out into",
+	"  independent sub-tasks, delegate them as child agents. They run after you",
+	"  finish and their reports are folded back into your output. Only spawn when it",
+	"  genuinely parallelizes \u2014 otherwise just do the work yourself.",
+	"",
+	"Default habit: ctx_read first, do the work (reusing shared findings), ctx_write",
+	"anything reusable, then ctx_report your result.",
+].join("\n");
 
 export function isFailed(r: RunResult): boolean {
 	return r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
@@ -282,6 +325,25 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 }
 
 /**
+ * Resolve the path to this extension's entry file, so a spawned subagent can be
+ * launched with `--extension <path>` and register the ctx_* tools. Returns
+ * undefined if it cannot be resolved (the subagent then simply runs without the
+ * ctx tools — fail-open: context sharing degrades to "no sharing").
+ */
+export function ctxExtensionPath(): string | undefined {
+	const override = process.env.PI_TASKFLOW_EXT_PATH;
+	if (override) return override;
+	try {
+		const here = path.dirname(new URL(import.meta.url).pathname);
+		const entry = path.join(here, "index.ts");
+		if (fs.existsSync(entry)) return entry;
+	} catch {
+		/* fall through */
+	}
+	return undefined;
+}
+
+/**
  * Run a single subagent task. Resolves the agent from `agents` by name and
  * spawns an isolated pi process, returning structured output + usage.
  */
@@ -310,7 +372,15 @@ export async function runAgentTask(
 
 	const model = opts.model ?? agent.model;
 	const thinking = opts.thinking ?? agent.thinking ?? globalThinking;
-	const tools = opts.tools ?? agent.tools;
+	const ctxEnabledEarly = Boolean(opts.ctxDir && opts.nodeId);
+	let tools = opts.tools ?? agent.tools;
+	// If the agent restricts tools to a whitelist, the ctx_* tools we register
+	// would be filtered out by `--tools` even though they're registered. When
+	// context sharing is on, extend the whitelist so the subagent can actually
+	// call them. (No whitelist = all tools available = nothing to do.)
+	if (ctxEnabledEarly && tools && tools.length > 0) {
+		tools = [...new Set([...tools, ...CTX_TOOL_NAMES])];
+	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (model) args.push("--model", model);
@@ -332,17 +402,39 @@ export async function runAgentTask(
 	};
 
 	try {
-		if (agent.systemPrompt.trim()) {
+		const ctxEnabled = Boolean(opts.ctxDir && opts.nodeId);
+		// Build the appended system prompt = the agent's own prompt PLUS, when the
+		// Shared Context Tree is enabled for this phase, a guidance block that tells
+		// the subagent the ctx_* tools exist and the discipline for using them.
+		// Without this the model only sees terse tool descriptions and rarely uses
+		// them proactively (capability != usage).
+		const appendedPrompt = [agent.systemPrompt.trim(), ctxEnabled ? CTX_TOOLS_GUIDANCE : ""]
+			.filter(Boolean)
+			.join("\n\n");
+		if (appendedPrompt) {
 			// Allocate the temp dir + path BEFORE any fallible I/O so that if
 			// writeFile throws, tmpPromptDir/tmpPromptPath are already set and
 			// the finally block can clean up the directory (F-004).
 			tmpPromptDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-taskflow-"));
 			const safeName = agent.name.replace(/[^\w.-]+/g, "_");
 			tmpPromptPath = path.join(tmpPromptDir, `prompt-${safeName}.md`);
-			await writePromptToTempFile(tmpPromptPath, agent.systemPrompt);
+			await writePromptToTempFile(tmpPromptPath, appendedPrompt);
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 		args.push(`Task: ${task}`);
+
+		// Shared Context Tree opt-in: load THIS extension into the subagent so it
+		// can register the ctx_* tools, and pass the blackboard dir + node id via
+		// env. `--extension` is the explicit, self-documenting fallback that does
+		// not rely on the subagent auto-discovering user/project extensions in
+		// `-p` mode. The env vars drive the dual-identity branch in index.ts.
+		const ctxEnv: Record<string, string> = {};
+		if (opts.ctxDir && opts.nodeId) {
+			const selfPath = ctxExtensionPath();
+			if (selfPath) args.push("--extension", selfPath);
+			ctxEnv.PI_TASKFLOW_CTX_DIR = opts.ctxDir;
+			ctxEnv.PI_TASKFLOW_NODE_ID = opts.nodeId;
+		}
 
 		let wasAborted = false;
 		let idleTimedOut = false;
@@ -353,6 +445,7 @@ export async function runAgentTask(
 				cwd: opts.cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				env: { ...process.env, ...ctxEnv },
 			});
 			if (proc.pid) activeChildren.add(proc.pid);
 			let buffer = "";

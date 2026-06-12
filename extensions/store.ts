@@ -190,13 +190,14 @@ function lockPathForRun(runsRoot: string, flowName: string, runId: string): stri
  * Validate that a runId looks safe before performing any filesystem access.
  * Legitimate runIds are produced by newRunId() and contain only [A-Za-z0-9._-].
  */
-function validateRunId(runId: string): boolean {
+export function validateRunId(runId: string): boolean {
 	return (
 		typeof runId === "string" &&
 		runId.length > 0 &&
 		!runId.includes("/") &&
 		!runId.includes("\\") &&
-		!runId.includes("\0")
+		!runId.includes("\0") &&
+		!runId.includes("..")
 	);
 }
 
@@ -509,6 +510,16 @@ function cleanupTerminalRuns(
 		try { fs.unlinkSync(filePath); } catch { /* already gone */ }
 		// Also remove any orphaned lock file.
 		try { fs.unlinkSync(filePath + ".lock"); } catch { /* ignore */ }
+		// Also remove the per-run Shared Context Tree directory (C6). Orphaned
+		// ctx dirs would otherwise accumulate under runs/ctx/ over many runs.
+		try { fs.rmSync(path.join(runsRoot, "ctx", e.runId), { recursive: true, force: true }); } catch { /* ignore */ }
+		// Also remove the per-run isolated-workspace dir tree (cwd:"dedicated").
+		// `dedicated` workspaces are persistent by design; reclaim them once the
+		// run is pruned. The dir name uses the same sanitization as workspace.ts.
+		try {
+			const wsSeg = e.runId.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_").slice(0, 100) || "phase";
+			fs.rmSync(path.join(runsRoot, "ws", wsSeg), { recursive: true, force: true });
+		} catch { /* ignore */ }
 	}
 
 	// Remove empty flow subdirectories.
@@ -622,7 +633,7 @@ export function saveFlow(
 
 // --- Run state ---
 
-function runsDir(cwd: string): string {
+export function runsDir(cwd: string): string {
 	// Safe non-null assertion: create=true guarantees a non-null return because
 	// findProjectFlowsDirInternal falls back to path.join(cwd, ".pi", "taskflows").
 	const projDir = findProjectFlowsDir(cwd, true)!;
@@ -636,7 +647,9 @@ export function cacheDir(cwd: string): string {
 }
 
 export function newRunId(flowName: string): string {
-	const safe = flowName.replace(/[^\w.-]+/g, "_").slice(0, 24);
+	// Collapse to a safe charset AND fold any dot-runs so the result can never
+	// contain a '..' traversal token (validateRunId rejects '..').
+	const safe = flowName.replace(/[^\w.-]+/g, "_").replace(/\.{2,}/g, "_").slice(0, 24);
 	return `${safe}-${Date.now().toString(36)}-${crypto.randomBytes(3).toString("hex")}`;
 }
 

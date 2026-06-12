@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type EventAccumulator,
+	CTX_TOOLS_GUIDANCE,
 	foldEventLine,
 	isFailed,
 	looksLikeHtmlOrJson,
@@ -600,6 +601,89 @@ process.exit(0);
 	} finally {
 		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
 		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ── Shared Context Tree: guidance + env + extension wiring ───────────
+
+test("CTX_TOOLS_GUIDANCE mentions all four tools and the read-first discipline", () => {
+	for (const tool of ["ctx_read", "ctx_write", "ctx_report", "ctx_spawn"]) {
+		assert.match(CTX_TOOLS_GUIDANCE, new RegExp(tool), `guidance mentions ${tool}`);
+	}
+	assert.match(CTX_TOOLS_GUIDANCE, /BEFORE exploring/i, "tells the agent to read before exploring");
+});
+
+test("runAgentTask: ctxDir/nodeId opt-in injects env, --extension, and the guidance prompt", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-ctxwire-"));
+	const capture = path.join(dir, "capture.json");
+	const fakePi = path.join(dir, "fake-pi.mjs");
+	fs.writeFileSync(
+		fakePi,
+		`import * as fs from "node:fs";\n` +
+			`const argv = process.argv.slice(2);\n` +
+			`const i = argv.indexOf("--append-system-prompt");\n` +
+			`const promptFile = i >= 0 ? argv[i + 1] : null;\n` +
+			`const prompt = promptFile ? fs.readFileSync(promptFile, "utf-8") : "";\n` +
+			`fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({\n` +
+			`  hasExtension: argv.includes("--extension"),\n` +
+			`  tools: (() => { const j = argv.indexOf("--tools"); return j >= 0 ? argv[j + 1] : null; })(),\n` +
+			`  ctxDir: process.env.PI_TASKFLOW_CTX_DIR ?? null,\n` +
+			`  nodeId: process.env.PI_TASKFLOW_NODE_ID ?? null,\n` +
+			`  prompt,\n` +
+			`}));\n` +
+			`process.exit(0);\n`,
+	);
+	const shim = path.join(dir, "shim.sh");
+	fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${fakePi}" "$@"\n`);
+	fs.chmodSync(shim, 0o755);
+
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	const prevExt = process.env.PI_TASKFLOW_EXT_PATH;
+	process.env.PI_TASKFLOW_PI_BIN = shim;
+	process.env.PI_TASKFLOW_EXT_PATH = fakePi; // a real file so --extension is added
+	try {
+		const agents: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "AGENT-OWN-PROMPT", source: "user", filePath: "" },
+		];
+
+		// (1) Opted IN.
+		await runAgentTask(dir, agents, "t", "do work", { ctxDir: dir, nodeId: "node-1" });
+		const on = JSON.parse(fs.readFileSync(capture, "utf-8"));
+		assert.equal(on.ctxDir, dir, "PI_TASKFLOW_CTX_DIR injected");
+		assert.equal(on.nodeId, "node-1", "PI_TASKFLOW_NODE_ID injected");
+		assert.equal(on.hasExtension, true, "--extension flag added");
+		assert.match(on.prompt, /AGENT-OWN-PROMPT/, "agent's own prompt preserved");
+		assert.match(on.prompt, /Shared Context Tree/, "guidance appended");
+		assert.match(on.prompt, /ctx_read/, "guidance lists the tools");
+
+		// (1b) An agent with a TOOLS WHITELIST must get the ctx_* tools appended,
+		// else --tools would filter out the registered tools (real e2e bug).
+		fs.rmSync(capture, { force: true });
+		const whitelisted: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "", tools: ["read", "grep"] },
+		];
+		await runAgentTask(dir, whitelisted, "t", "do work", { ctxDir: dir, nodeId: "node-2" });
+		const wl = JSON.parse(fs.readFileSync(capture, "utf-8"));
+		assert.ok(wl.tools, "--tools whitelist present");
+		for (const t of ["read", "grep", "ctx_read", "ctx_write", "ctx_report", "ctx_spawn"]) {
+			assert.match(wl.tools, new RegExp(`\\b${t}\\b`), `whitelist includes ${t}`);
+		}
+
+		// (2) Opted OUT.
+		fs.rmSync(capture, { force: true });
+		await runAgentTask(dir, agents, "t", "do work", {});
+		const off = JSON.parse(fs.readFileSync(capture, "utf-8"));
+		assert.equal(off.ctxDir, null, "no ctx env when not opted in");
+		assert.equal(off.nodeId, null);
+		assert.equal(off.hasExtension, false, "no --extension when not opted in");
+		assert.doesNotMatch(off.prompt, /Shared Context Tree/, "no guidance when not opted in");
+		assert.match(off.prompt, /AGENT-OWN-PROMPT/, "agent prompt still present");
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		if (prevExt === undefined) delete process.env.PI_TASKFLOW_EXT_PATH;
+		else process.env.PI_TASKFLOW_EXT_PATH = prevExt;
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });

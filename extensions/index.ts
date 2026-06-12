@@ -44,6 +44,16 @@ import {
 } from "./store.ts";
 import { CacheStore } from "./cache.ts";
 import { safeParse } from "./interpolate.ts";
+import {
+	isValidKey,
+	queueSpawn,
+	readVisibleFindings,
+	readTree,
+	nodeDepth,
+	writeFinding,
+	writeReport,
+} from "./context-store.ts";
+import { MAX_DYNAMIC_NESTING } from "./schema.ts";
 
 interface TaskflowDetails {
 	state?: RunState;
@@ -292,6 +302,21 @@ async function runFlow(
 }
 
 export default function (pi: ExtensionAPI) {
+	// ---- Dual identity ----------------------------------------------------
+	// When this extension is loaded INSIDE a subagent process that the taskflow
+	// runtime spawned with Shared Context Tree enabled, PI_TASKFLOW_CTX_DIR +
+	// PI_TASKFLOW_NODE_ID are present. In that case we register the ctx_* tools
+	// (the blackboard + supervision API) instead of the host `taskflow` tool —
+	// a subagent has no business orchestrating its own taskflows, and the host
+	// tool's heavy machinery is irrelevant there. When the env is absent we are
+	// the host: register `taskflow` + `/tf` exactly as before (zero change).
+	const ctxDir = process.env.PI_TASKFLOW_CTX_DIR;
+	const nodeId = process.env.PI_TASKFLOW_NODE_ID;
+	if (ctxDir && nodeId) {
+		registerCtxTools(pi, ctxDir, nodeId);
+		return;
+	}
+
 	// ---- Register per-saved-flow shortcut commands on session start ----
 	const registerSavedFlowCommands = (ctx: ExtensionContext) => {
 		const flows = listFlows(ctx.cwd);
@@ -911,6 +936,116 @@ export default function (pi: ExtensionAPI) {
 }
 
 // --- helpers ---
+
+/**
+ * Register the Shared Context Tree tools inside a subagent process. These read
+ * & write the per-run blackboard at `ctxDir` on behalf of node `nodeId`.
+ *
+ * - ctx_read   : read findings visible to this node (own + ancestors + completed others)
+ * - ctx_write  : write a finding (last-write-wins per key) so siblings can reuse it
+ * - ctx_report : report a result upward to the parent
+ * - ctx_spawn  : queue child tasks the runtime picks up after this node finishes
+ */
+function registerCtxTools(pi: ExtensionAPI, ctxDir: string, nodeId: string) {
+	const textResult = (text: string, isError = false): ToolResult => ({
+		content: [{ type: "text", text }],
+		details: { action: "ctx" },
+		...(isError ? { isError: true } : {}),
+	});
+
+	pi.registerTool({
+		name: "ctx_read",
+		label: "Context Read",
+		description:
+			"Read shared findings from the taskflow blackboard (what sibling/ancestor agents already discovered). Pass a key to read one value, or omit to list all visible findings. Use this BEFORE re-reading files another agent may have already mapped.",
+		parameters: Type.Object({
+			key: Type.Optional(Type.String({ description: "Specific finding key to read; omit to get all visible findings." })),
+		}),
+		async execute(_id, params) {
+			try {
+				const out = readVisibleFindings(ctxDir, nodeId, params.key);
+				return textResult(typeof out === "string" ? out : JSON.stringify(out ?? null, null, 2));
+			} catch (e) {
+				return textResult(`ctx_read failed: ${e instanceof Error ? e.message : String(e)}`, true);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "ctx_write",
+		label: "Context Write",
+		description:
+			"Write a finding to the shared taskflow blackboard so sibling/descendant agents can reuse it without re-reading files. Key must be [A-Za-z0-9._-] (<=128 chars). Value is any JSON. Last write wins per key.",
+		parameters: Type.Object({
+			key: Type.String({ description: "Finding key, e.g. 'endpoints' or 'auth.summary'." }),
+			value: Type.Unknown({ description: "The value to store (string, number, object, or array)." }),
+		}),
+		async execute(_id, params) {
+			if (!isValidKey(params.key)) {
+				return textResult(`ctx_write rejected: invalid key '${params.key}'.`, true);
+			}
+			try {
+				writeFinding(ctxDir, nodeId, params.key, params.value);
+				return textResult(`Stored finding '${params.key}'.`);
+			} catch (e) {
+				return textResult(`ctx_write failed: ${e instanceof Error ? e.message : String(e)}`, true);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "ctx_report",
+		label: "Context Report",
+		description:
+			"Report your result upward to the parent task. Provide a concise summary and optional structured JSON. The parent (and downstream phases) will see this report.",
+		parameters: Type.Object({
+			summary: Type.String({ description: "Concise summary of what you accomplished / found." }),
+			structured: Type.Optional(Type.Unknown({ description: "Optional structured result (JSON)." })),
+		}),
+		async execute(_id, params) {
+			try {
+				writeReport(ctxDir, nodeId, params.summary, params.structured);
+				return textResult("Report recorded.");
+			} catch (e) {
+				return textResult(`ctx_report failed: ${e instanceof Error ? e.message : String(e)}`, true);
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "ctx_spawn",
+		label: "Context Spawn",
+		description:
+			"Delegate sub-tasks to NEW child agents. After you finish, the runtime runs each child (isolated context) and folds their reports back into your output. Use when you discover the work needs to fan out. Each assignment is EITHER {task, agent?} for one flat task, OR {subflow, defaultAgent?} where subflow is an inline plan {phases:[...]} (a dependency-bearing DAG: phases can use dependsOn / map / gate / reduce). Use a subflow when the delegated work itself has multiple coordinated steps.",
+		parameters: Type.Object({
+			assignments: Type.Array(
+				Type.Object({
+					task: Type.Optional(Type.String({ description: "A single child task prompt (use this OR subflow, not both)." })),
+					agent: Type.Optional(Type.String({ description: "Agent name for a flat task (optional)." })),
+					subflow: Type.Optional(Type.Unknown({ description: "An inline Taskflow plan {phases:[...]} or a bare phases array, run as a nested validated sub-flow." })),
+					defaultAgent: Type.Optional(Type.String({ description: "Fallback agent for subflow phases that don't name their own (optional)." })),
+				}),
+				{ description: "Child tasks to spawn (1..16). Each is a flat {task} or a {subflow} DAG." },
+			),
+		}),
+		async execute(_id, params) {
+			// Depth cap: walk the parent chain in the tree to find this node's depth.
+			try {
+				const depth = nodeDepth(readTree(ctxDir), nodeId);
+				if (depth >= MAX_DYNAMIC_NESTING) {
+					return textResult(
+						`ctx_spawn rejected: depth ${depth} >= MAX_DYNAMIC_NESTING (${MAX_DYNAMIC_NESTING}). Do the work yourself.`,
+						true,
+					);
+				}
+				const n = queueSpawn(ctxDir, nodeId, params.assignments);
+				return textResult(`Queued ${n} child task(s); they will run after you finish and their reports will be appended to your output.`);
+			} catch (e) {
+				return textResult(`ctx_spawn failed: ${e instanceof Error ? e.message : String(e)}`, true);
+			}
+		},
+	});
+}
 
 function errorResult(action: string, message: string): ToolResult {
 	return {

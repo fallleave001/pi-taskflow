@@ -18,8 +18,10 @@ import { isFailed, isTransientError, type LiveUpdate, mapWithConcurrencyLimit, r
 import { aggregateUsage, emptyUsage, type UsageStats } from "./usage.ts";
 import { type Budget, type CacheScope, dependenciesOf, finalPhase, LOOP_DEFAULT_MAX_ITERATIONS, LOOP_HARD_MAX_ITERATIONS, MAX_DYNAMIC_MAP_ITEMS, MAX_DYNAMIC_NESTING, parseTtlMs, type Phase, resolveArgs, type Taskflow, topoLayers, TOURNAMENT_DEFAULT_VARIANTS, TOURNAMENT_HARD_MAX_VARIANTS, type TournamentMode, validateTaskflow } from "./schema.ts";
 import { verifyTaskflow } from "./verify.ts";
-import { hashInput, newRunId, type PhaseState, type RunState } from "./store.ts";
+import { hashInput, newRunId, type PhaseState, type RunState, runsDir } from "./store.ts";
 import { CacheStore, resolveFingerprint } from "./cache.ts";
+import { ctxDirFor, drainPendingSpawns, initCtxDir, registerNode, setNodeStatus, type SpawnAssignment } from "./context-store.ts";
+import { allocateWorkspace, isWorkspaceKeyword, type Workspace } from "./workspace.ts";
 
 /** A human-in-the-loop approval request raised by an `approval` phase. */
 export interface ApprovalRequest {
@@ -55,6 +57,10 @@ export interface RuntimeDeps {
 	cacheStore?: CacheStore;
 	/** Internal: sub-flow call stack, for recursion detection. */
 	_stack?: string[];
+	/** Internal: pre-resolved Shared Context Tree dir for this run (sub-flows inherit the parent's). */
+	_ctxDir?: string;
+	/** Internal: an isolated workspace dir override for the current phase (worktree isolation). */
+	_cwdOverride?: string;
 }
 
 export interface RuntimeResult {
@@ -372,8 +378,221 @@ async function resolvePhaseContext(
 	return result;
 }
 
+/**
+ * Supervision loop: run the child tasks a parent node queued via ctx_spawn.
+ * Each child is an isolated subagent registered under the parent in the tree.
+ * Children themselves may share context (and recursively spawn, up to the depth
+ * cap enforced inside the ctx_spawn tool). Returns a markdown block of the
+ * children's reports to fold into the parent phase's output, or undefined.
+ *
+ * Fail-open: a child failure is recorded in its report text but never throws.
+ */
+/** What a spawned child contributed: its folded report text + the tokens it burned. */
+interface SpawnedResult {
+	reports: string | undefined;
+	usage: UsageStats;
+}
 
+/**
+ * Run an inline sub-flow queued via `ctx_spawn({subflow})`. Reuses the SAME
+ * validation + execution machinery as a `flow{def}` phase (normalizeInlineDef →
+ * validateTaskflow(dynamic) → verifyTaskflow → nested executeTaskflow), so a
+ * spawned DAG is held to the same safety bar as an author-written one.
+ *
+ * Crucially it extends `deps._stack` with a `def:spawn-<childNodeId>` frame so
+ * the existing inline-nesting guard counts spawn-subflows AND flow{def} on the
+ * SAME counter — neither axis can independently reach MAX_DYNAMIC_NESTING and
+ * multiply with the other (verdict Issue 1). Failures are fail-open: a bad
+ * subflow returns a diagnostic string, never throws.
+ */
+/**
+ * The effective working directory for a phase's execution. Honours an allocated
+ * workspace override (`_cwdOverride`, set by the executePhase wrapper for
+ * isolated `temp`/`dedicated`/`worktree` cwds) and never passes a reserved
+ * keyword through to a runner (keywords are resolved upstream into a real dir).
+ * Single source of truth — do not inline this formula (divergence here caused
+ * two isolation-leak bugs in the 0.0.23 review).
+ */
+function resolveEffCwd(deps: RuntimeDeps, phase: Phase): string {
+	return deps._cwdOverride ?? (isWorkspaceKeyword(phase.cwd) ? deps.cwd : phase.cwd ?? deps.cwd);
+}
+
+async function runInlineSubflow(
+	subflowSpec: unknown,
+	defaultAgent: string | undefined,
+	childNodeId: string,
+	phase: Phase,
+	deps: RuntimeDeps,
+	state: RunState,
+): Promise<{ output: string; usage: UsageStats }> {
+	const stack = deps._stack ?? [];
+	const inlineDepth = stack.filter((s) => s.startsWith("def:")).length;
+	if (inlineDepth >= MAX_DYNAMIC_NESTING) {
+		return { output: `(spawned subflow rejected: nesting exceeded MAX_DYNAMIC_NESTING (${MAX_DYNAMIC_NESTING}))`, usage: emptyUsage() };
+	}
+	const wrapped = normalizeInlineDef(subflowSpec, childNodeId);
+	if (!wrapped) return { output: "(spawned subflow is not a Taskflow / phases array)", usage: emptyUsage() };
+	if (wrapped.phases.length === 0) return { output: "(spawned subflow had zero phases — no-op)", usage: emptyUsage() };
+	// Inner phases without their own agent inherit the assignment's defaultAgent.
+	if (defaultAgent) {
+		for (const p of wrapped.phases as Phase[]) if (!p.agent) p.agent = defaultAgent;
+	}
+	const spawnCwd = resolveEffCwd(deps, phase);
+	const dynCwd = spawnCwd;
+	const v = validateTaskflow(wrapped, { dynamic: true, cwd: dynCwd });
+	if (!v.ok) return { output: `(spawned subflow failed validation: ${v.errors.join("; ")})`, usage: emptyUsage() };
+	const ver = verifyTaskflow({ name: wrapped.name, phases: wrapped.phases as Phase[], budget: wrapped.budget, concurrency: wrapped.concurrency });
+	if (!ver.ok) {
+		const errs = ver.issues.filter((i) => i.severity === "error").map((i) => i.message);
+		return { output: `(spawned subflow failed verification: ${errs.join("; ")})`, usage: emptyUsage() };
+	}
+	const subDef = clampSubFlowBudget(wrapped, state.def.budget);
+	const subState: RunState = {
+		runId: newRunId(subDef.name),
+		flowName: subDef.name,
+		def: subDef,
+		args: resolveArgs(subDef, {}),
+		status: "running",
+		phases: {},
+		createdAt: Date.now(),
+		updatedAt: Date.now(),
+		cwd: dynCwd,
+	};
+	try {
+		const subResult = await executeTaskflow(subState, {
+			...deps,
+			cwd: dynCwd,
+			// The parent phase's isolated workspace (if any) applies only to the
+			// parent — each spawned sub-phase resolves its own cwd. Clear the
+			// override so the whole subflow doesn't inherit the parent's dir
+			// (mirrors the `flow` phase handler discipline).
+			_cwdOverride: undefined,
+			// Don't let spawned sub-phases persist the parent's run state.
+			persist: undefined,
+			// Unify the nesting counter across both recursion axes (verdict Issue 1).
+			_stack: [...stack, state.flowName, `def:spawn-${childNodeId}`],
+			_ctxDir: deps._ctxDir,
+			onProgress: undefined,
+		});
+		// Sum every sub-phase's usage so the parent's budget guard sees spawn spend
+		// (verdict Issue 2).
+		const usage = aggregateUsage(Object.values(subResult.state.phases).map((p) => p.usage ?? emptyUsage()));
+		return { output: subResult.finalOutput ?? "", usage };
+	} catch (e) {
+		return { output: `(spawned subflow failed: ${e instanceof Error ? e.message : String(e)})`, usage: emptyUsage() };
+	}
+}
+
+async function runSpawnedChildren(
+	assignments: SpawnAssignment[],
+	ctxDir: string,
+	parentNodeId: string,
+	phase: Phase,
+	deps: RuntimeDeps,
+	state: RunState,
+	run: typeof runAgentTask,
+): Promise<SpawnedResult> {
+	const capped = assignments.slice(0, MAX_DYNAMIC_MAP_ITEMS);
+	const lines: string[] = [];
+	const usages: UsageStats[] = [];
+	// Effective cwd for flat spawned tasks: honour a workspace override and never
+	// pass a reserved keyword through to the runner.
+	const spawnCwd = resolveEffCwd(deps, phase);
+	let idx = 0;
+	for (const a of capped) {
+		if (deps.signal?.aborted || overBudget(state).over) break;
+		idx++;
+		const childNodeId = `${parentNodeId}--c${idx}`.replace(/[^A-Za-z0-9._-]+/g, "_");
+		const isSubflow = a.subflow !== undefined && a.subflow !== null;
+		const agentName = isSubflow ? "(subflow)" : resolveAgent(a.agent ?? phase.agent, deps, state);
+		registerNode(ctxDir, childNodeId, `${phase.id}:spawn`, parentNodeId, "running");
+		let out = "";
+		try {
+			if (isSubflow) {
+				const sub = await runInlineSubflow(a.subflow, a.defaultAgent ?? phase.agent, childNodeId, phase, deps, state);
+				out = sub.output;
+				usages.push(sub.usage);
+				setNodeStatus(ctxDir, childNodeId, "done");
+			} else {
+				const r = await run(
+					spawnCwd,
+					deps.agents,
+					agentName,
+					a.task ?? "",
+					{ model: phase.model, thinking: phase.thinking, tools: phase.tools, cwd: spawnCwd, signal: deps.signal, ctxDir, nodeId: childNodeId },
+					deps.globalThinking,
+				);
+				out = r.output ?? "";
+				if (r.usage) usages.push(r.usage);
+				setNodeStatus(ctxDir, childNodeId, isFailed(r) ? "failed" : "done");
+				// A child may itself have queued spawns — recurse (depth-capped by the tool).
+				const grand = drainPendingSpawns(ctxDir, childNodeId);
+				if (grand.length > 0 && !deps.signal?.aborted && !overBudget(state).over) {
+					const rec = await runSpawnedChildren(grand, ctxDir, childNodeId, phase, deps, state, run);
+					if (rec.reports) out += rec.reports;
+					usages.push(rec.usage);
+				}
+			}
+		} catch (e) {
+			setNodeStatus(ctxDir, childNodeId, "failed");
+			out = `(spawned child failed: ${e instanceof Error ? e.message : String(e)})`;
+		}
+		lines.push(`### spawned child ${idx} (${agentName})\n${out}`);
+	}
+	const usage = aggregateUsage(usages);
+	if (lines.length === 0) return { reports: undefined, usage };
+	return { reports: `\n\n<!-- ctx_spawn: ${lines.length} child report(s) -->\n${lines.join("\n\n")}`, usage };
+}
+
+
+/**
+ * Public phase executor. Resolves an isolated workspace when `phase.cwd` is a
+ * reserved keyword (`temp`/`dedicated`/`worktree`), runs the phase against it,
+ * and tears it down afterwards. All allocation is fail-open: a failed allocation
+ * degrades to the base cwd so a phase never fails to run because of isolation.
+ */
 async function executePhase(
+	phase: Phase,
+	state: RunState,
+	deps: RuntimeDeps,
+	prior: PhaseState | undefined,
+	emitProgress: () => void,
+	_retryDepth = 0,
+): Promise<PhaseState> {
+	// Non-keyword cwd (or none): no workspace lifecycle — run directly.
+	if (!isWorkspaceKeyword(phase.cwd)) {
+		return executePhaseInner(phase, state, deps, prior, emitProgress, _retryDepth);
+	}
+	let ws: Workspace | undefined;
+	try {
+		ws = allocateWorkspace(phase.cwd, {
+			baseCwd: deps.cwd,
+			runId: state.runId,
+			phaseId: phase.id,
+			runsRoot: runsDir(deps.cwd),
+		});
+	} catch {
+		ws = undefined; // fail-open: run in the base cwd
+	}
+	const innerDeps: RuntimeDeps = ws ? { ...deps, _cwdOverride: ws.dir } : deps;
+	try {
+		const ps = await executePhaseInner(phase, state, innerDeps, prior, emitProgress, _retryDepth);
+		if (ws && (ws.kind !== "inherited" || ws.note)) {
+			const tag = ws.kind === "inherited" ? "workspace" : `workspace:${ws.kind}`;
+			const msg = ws.note ? `${tag} — ${ws.note}` : `${tag} at ${ws.dir}`;
+			ps.warnings = [...(ps.warnings ?? []), msg];
+		}
+		return ps;
+	} finally {
+		try {
+			ws?.teardown();
+		} catch {
+			/* fail-open: teardown best-effort */
+		}
+	}
+}
+
+async function executePhaseInner(
 	phase: Phase,
 	state: RunState,
 	deps: RuntimeDeps,
@@ -385,6 +604,29 @@ async function executePhase(
 	const concurrency = phase.concurrency ?? state.def.concurrency ?? 8;
 	const previousOutput = lastCompletedOutput(state, phase);
 	const run = deps.runTask ?? runAgentTask;
+	// Effective working directory for THIS phase's execution. When an isolated
+	// workspace was allocated (worktree isolation), `_cwdOverride` is its dir and
+	// takes precedence; otherwise a literal `phase.cwd` (non-keyword) or the run
+	// cwd is used. Keyword cwds are never passed to a runner (they're resolved
+	// upstream in the executePhase wrapper).
+	const effCwd = resolveEffCwd(deps, phase);
+
+	// Shared Context Tree opt-in (per-phase or flow-wide). When on, the subagent
+	// gets ctx_* tools backed by a per-run blackboard directory. nodeId is
+	// deterministic per phase so a resume re-uses the same tree node (idempotent
+	// upsert in registerNode prevents duplication). Sub-items (map/parallel) get
+	// a suffixed nodeId so concurrent siblings write to distinct findings files.
+	const sharing = (phase.shareContext ?? state.def.contextSharing) === true;
+	let ctxDir: string | undefined;
+	if (sharing) {
+		try {
+			ctxDir = deps._ctxDir ?? initCtxDir(ctxDirFor(runsDir(deps.cwd), state.runId));
+		} catch {
+			ctxDir = undefined; // fail-open: degrade to no sharing
+		}
+	}
+	const nodeIdFor = (suffix?: string): string =>
+		`${phase.id}${suffix ? `-${suffix}` : ""}`.replace(/[^A-Za-z0-9._-]+/g, "_");
 
 	// Resolve context pre-read files once, before any type branching.
 	// The content is prepended to every task so the subagent never spends
@@ -399,7 +641,7 @@ async function executePhase(
 	const cc: PhaseCacheCtx = {
 		scope: cacheScope,
 		ttlMs: phase.cache?.ttl ? (parseTtlMs(phase.cache.ttl) ?? undefined) : undefined,
-		fingerprint: cacheScope === "cross-run" ? resolveFingerprint(phase.cache?.fingerprint, phase.cwd ?? deps.cwd) : "",
+		fingerprint: cacheScope === "cross-run" ? resolveFingerprint(phase.cache?.fingerprint, effCwd) : "",
 		store: deps.cacheStore ?? new CacheStore(deps.cwd),
 		prior,
 		phaseId: phase.id,
@@ -410,9 +652,9 @@ async function executePhase(
 		preRead,
 	};
 
-	const baseRun = (agentName: string, task: string, onLive?: (l: LiveUpdate) => void) =>
+	const baseRun = (agentName: string, task: string, onLive?: (l: LiveUpdate) => void, ctxNodeId?: string) =>
 		run(
-			deps.cwd,
+			effCwd,
 			deps.agents,
 			agentName,
 			task,
@@ -420,9 +662,11 @@ async function executePhase(
 				model: phase.model,
 				thinking: phase.thinking,
 				tools: phase.tools,
-				cwd: phase.cwd,
+				cwd: effCwd,
 				signal: deps.signal,
 				onLive,
+				ctxDir: ctxDir,
+				nodeId: ctxDir ? ctxNodeId : undefined,
 			},
 			deps.globalThinking,
 		);
@@ -439,7 +683,7 @@ async function executePhase(
 	const DEFAULT_TRANSIENT_RETRIES = 3;
 	const DEFAULT_TRANSIENT_BACKOFF_MS = 2000;
 	const DEFAULT_TRANSIENT_FACTOR = 2;
-	const runOne = async (agentName: string, task: string, onLive?: (l: LiveUpdate) => void): Promise<RunResult> => {
+	const runOne = async (agentName: string, task: string, onLive?: (l: LiveUpdate) => void, ctxNodeId?: string): Promise<RunResult> => {
 		const explicitMax = Math.max(1, 1 + Math.max(0, Math.floor(retry?.max ?? 0)));
 		// Allow enough attempts to cover whichever policy applies on a given attempt.
 		const maxAttempts = Math.max(explicitMax, 1 + DEFAULT_TRANSIENT_RETRIES);
@@ -447,7 +691,7 @@ async function executePhase(
 		let last: RunResult | undefined;
 		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			if (deps.signal?.aborted) break;
-			last = await baseRun(agentName, task, onLive);
+			last = await baseRun(agentName, task, onLive, ctxNodeId);
 			usages.push(last.usage);
 			// B6: aggregate and surface cumulative usage before the retry decision,
 			// so the TUI / budget guard see the in-flight spend on every attempt.
@@ -537,16 +781,37 @@ async function executePhase(
 			}
 			running++;
 			refresh();
+			if (ctxDir) {
+				try { registerNode(ctxDir, nodeIdFor(String(idx)), phase.id, undefined, "running"); } catch { /* fail-open */ }
+			}
 			const r = await runOne(it.agent, it.task, (l) => {
 				liveUsages[idx] = l.usage;
 				if (l.text) latestText = l.text;
 				if (l.model) latestModel = l.model;
 				refresh();
-			});
+			}, ctxDir ? nodeIdFor(String(idx)) : undefined);
 			running--;
 			done++;
 			if (isFailed(r)) failed++;
 			liveUsages[idx] = r.usage;
+			if (ctxDir) {
+				try {
+					const itemNid = nodeIdFor(String(idx));
+					setNodeStatus(ctxDir, itemNid, isFailed(r) ? "failed" : "done");
+					// A fan-out item may itself ctx_spawn children. Without this drain a
+					// map/parallel item's spawn intents are silently orphaned (the
+					// post-run drain below only covers single-agent phases).
+					const spawned = drainPendingSpawns(ctxDir, itemNid);
+					if (spawned.length > 0 && !deps.signal?.aborted && !overBudget(state).over) {
+						const child = await runSpawnedChildren(spawned, ctxDir, itemNid, phase, deps, state, run);
+						if (child.reports) r.output = `${r.output ?? ""}${child.reports}`;
+						if (child.usage) {
+							r.usage = aggregateUsage([r.usage ?? emptyUsage(), child.usage]);
+							liveUsages[idx] = r.usage;
+						}
+					}
+				} catch { /* fail-open */ }
+			}
 			refresh();
 			return r;
 		});
@@ -606,10 +871,31 @@ async function executePhase(
 		const cached = cachedPhase(cc, inputHash);
 		if (cached) return cached;
 
-		const r = await runOne(agentName, fullTask, liveSink(state, phase.id, emitProgress));
+		const r = await runOne(agentName, fullTask, liveSink(state, phase.id, emitProgress), nodeIdFor());
 		const ps = resultToPhaseState(phase.id, r, inputHash, parseJson);
 		if (refWarning) ps.warnings = [...(ps.warnings ?? []), refWarning];
 		if (type === "gate" && ps.status === "done") ps.gate = parseGateVerdict(r.output);
+
+		// Shared Context Tree: register this node, mark its terminal status, and
+		// pick up any ctx_spawn intents the subagent queued. The spawned child
+		// tasks run here (supervision loop) and their reports are folded into this
+		// phase's output so the parent — and downstream phases — can see them.
+		if (ctxDir) {
+			try {
+				const nid = nodeIdFor();
+				registerNode(ctxDir, nid, phase.id, undefined, ps.status === "failed" ? "failed" : "done");
+				const spawned = drainPendingSpawns(ctxDir, nid);
+				if (spawned.length > 0 && !deps.signal?.aborted && !overBudget(state).over) {
+					const child = await runSpawnedChildren(spawned, ctxDir, nid, phase, deps, state, run);
+					if (child.reports) ps.output = `${ps.output ?? ""}${child.reports}`;
+					// Fold spawned spend into this phase's usage so the run-wide budget
+					// guard accounts for it (verdict Issue 2).
+					ps.usage = aggregateUsage([ps.usage ?? emptyUsage(), child.usage]);
+				}
+			} catch {
+				/* fail-open: context-tree bookkeeping must never sink the phase */
+			}
+		}
 
 		// onBlock:retry — re-execute upstream + gate until pass or max attempts.
 		if (type === "gate" && ps.gate?.verdict === "block") {
@@ -624,10 +910,16 @@ async function executePhase(
 				// H2: cap nested retry depth to prevent exponential re-execution
 				// when a gate's upstream dependency is itself a gate with onBlock:retry
 				if (_retryDepth < MAX_RETRY_DEPTH) {
+					// Re-executing upstream deps must NOT inherit this gate's isolated
+					// workspace — each dep resolves its own cwd. Strip the override.
+					// NOTE: we intentionally pass the gate's `prior` (not the dep's own
+					// completed state) so the dep does NOT cache-hit and actually
+					// RE-RUNS — re-running upstream is the whole point of onBlock:retry.
+					const { _cwdOverride: _dropGateWs, ...depsForUpstream } = deps;
 					for (const depId of phase.dependsOn ?? []) {
 						const d = state.def.phases.find((p) => p.id === depId);
 						if (!d) continue;
-						const dPs = await executePhase(d, state, deps, prior, emitProgress, _retryDepth + 1);
+						const dPs = await executePhase(d, state, depsForUpstream, prior, emitProgress, _retryDepth + 1);
 						state.phases[depId] = dPs;
 					}
 				}
@@ -814,7 +1106,7 @@ async function executePhase(
 			}
 			// Validate with `dynamic` hardening (breadth caps + cwd containment) since
 			// this content is LLM-authored / untrusted. cwd anchors containment checks.
-			const dynCwd = phase.cwd ?? deps.cwd;
+			const dynCwd = effCwd;
 			const v = validateTaskflow(wrapped, { dynamic: true, cwd: dynCwd });
 			if (!v.ok) {
 				return defFailOpen(`inline def failed validation: ${v.errors.join("; ")}`);
@@ -873,7 +1165,7 @@ async function executePhase(
 			phases: {},
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
-			cwd: phase.cwd ?? deps.cwd,
+			cwd: effCwd,
 		};
 		// B8: pass this flow phase's preRead content to every sub-flow phase by
 		// wrapping runTask — sub-phase preRead still gets prepended on top of it.
@@ -885,9 +1177,14 @@ async function executePhase(
 			// Override deps.cwd with the flow phase's own cwd so that sub-flow
 			// phases without an explicit cwd derive their subagents from the
 			// flow's cwd (not the caller's cwd).
-			cwd: phase.cwd ?? deps.cwd,
+			cwd: effCwd,
+			// The workspace override applies only to THIS flow phase, not to the
+			// nested sub-phases (each resolves its own cwd). Clear it so the child
+			// phases don't all inherit this phase's isolated dir as an override.
+			_cwdOverride: undefined,
 			runTask: subRunTask,
 			_stack: hasDef ? [...stack, state.flowName, recursionKey] : [...stack, state.flowName],
+			_ctxDir: ctxDir ?? deps._ctxDir,
 			persist: undefined,
 			onProgress: () => {
 				if (live) {

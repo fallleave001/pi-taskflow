@@ -8,6 +8,7 @@
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
+import { WORKSPACE_KEYWORDS } from "./workspace.ts";
 
 // ---------------------------------------------------------------------------
 // Phase types
@@ -208,7 +209,7 @@ const PhaseSchema = Type.Object(
 		model: Type.Optional(Type.String({ description: "Model override for this phase" })),
 		thinking: Type.Optional(Type.String({ description: "Thinking level override for this phase" })),
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Restrict tools for this phase's agent" })),
-		cwd: Type.Optional(Type.String({ description: "Working directory for this phase's subagent" })),
+		cwd: Type.Optional(Type.String({ description: "Working directory for this phase's subagent. A literal path, or a reserved keyword: 'temp' (ephemeral dir, removed after the phase), 'dedicated' (persistent dir under the run state, kept), or 'worktree' (a git worktree on a throwaway branch, removed after the phase)." })),
 		final: Type.Optional(Type.Boolean({ description: "Mark this phase's output as the workflow result" })),
 		optional: Type.Optional(
 			Type.Boolean({ description: "If true, a failure does not abort the run", default: false }),
@@ -240,6 +241,12 @@ const PhaseSchema = Type.Object(
 			}),
 		),
 		cache: Type.Optional(CacheSchema),
+		shareContext: Type.Optional(
+			Type.Boolean({
+				description:
+					"Opt into the Shared Context Tree for this phase: the subagent gets ctx_read/ctx_write (a blackboard shared with siblings/ancestors, to avoid re-reading files) and ctx_report/ctx_spawn (report upward + queue child tasks the runtime picks up). Default false — existing flows are unaffected.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -269,6 +276,12 @@ export const TaskflowSchema = Type.Object(
 				description:
 					"When true, unresolved interpolation placeholders and validation warnings about missing deps/args become hard errors",
 				default: false,
+			}),
+		),
+		contextSharing: Type.Optional(
+			Type.Boolean({
+				description:
+					"Enable the Shared Context Tree for ALL phases in this flow (shorthand for setting shareContext on every phase). Default false.",
 			}),
 		),
 		phases: Type.Array(PhaseSchema, { minItems: 1, description: "Ordered phase definitions (DAG via dependsOn)" }),
@@ -485,11 +498,18 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 			if (typeof p.concurrency === "number" && p.concurrency > MAX_DYNAMIC_CONCURRENCY) {
 				errors.push(`Dynamic sub-flow phase '${p.id}': concurrency too high (${p.concurrency}, max ${MAX_DYNAMIC_CONCURRENCY})`);
 			}
-			// cwd containment: a generated phase may not escape the run's cwd.
-			if (typeof p.cwd === "string" && root) {
-				const resolved = path.resolve(root, p.cwd);
-				if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-					errors.push(`Dynamic sub-flow phase '${p.id}': cwd '${p.cwd}' escapes the run directory`);
+			// cwd containment: a generated phase may not escape the run's cwd, and
+			// may not request a reserved workspace keyword (temp/dedicated/worktree)
+			// — LLM-authored sub-flows must not allocate isolated dirs or git
+			// worktrees that mutate the repo. Only author-written flows may.
+			if (typeof p.cwd === "string") {
+				if (WORKSPACE_KEYWORDS.includes(p.cwd as (typeof WORKSPACE_KEYWORDS)[number])) {
+					errors.push(`Dynamic sub-flow phase '${p.id}': cwd '${p.cwd}' is a reserved workspace keyword not allowed in generated flows`);
+				} else if (root) {
+					const resolved = path.resolve(root, p.cwd);
+					if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+						errors.push(`Dynamic sub-flow phase '${p.id}': cwd '${p.cwd}' escapes the run directory`);
+					}
 				}
 			}
 		}
@@ -507,6 +527,14 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 		}
 		if (ids.has(p.id)) errors.push(`Duplicate phase id: ${p.id}`);
 		ids.add(p.id);
+
+		// When a phase opts into the Shared Context Tree, its id becomes a filesystem
+		// node id; restrict the charset so two ids can't sanitize to the same node
+		// (which would silently merge their blackboards). Non-sharing phases are
+		// unaffected (full backward compat).
+		if ((p.shareContext === true || flow.contextSharing === true) && !/^[A-Za-z0-9._-]+$/.test(p.id)) {
+			errors.push(`Phase '${p.id}': ids used with context sharing must match [A-Za-z0-9._-]+`);
+		}
 
 		const type = (p.type ?? "agent") as PhaseType;
 		if (!PHASE_TYPES.includes(type)) errors.push(`Phase '${p.id}': unknown type '${type}'`);
