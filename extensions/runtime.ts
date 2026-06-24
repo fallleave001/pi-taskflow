@@ -21,6 +21,7 @@ import { verifyTaskflow } from "./verify.ts";
 import { hashInput, newRunId, type PhaseState, type RunState, runsDir } from "./store.ts";
 import { CacheStore, resolveFingerprint } from "./cache.ts";
 import { flowDefHash } from "./flowir/hash.ts";
+import { computeStaleFrontier, readMapOf } from "./stale.ts";
 import { ctxDirFor, drainPendingSpawns, initCtxDir, registerNode, setNodeStatus, type SpawnAssignment } from "./context-store.ts";
 import { allocateWorkspace, isWorkspaceKeyword, type Workspace } from "./workspace.ts";
 
@@ -574,6 +575,15 @@ async function runSpawnedChildren(
  * and tears it down afterwards. All allocation is fail-open: a failed allocation
  * degrades to the base cwd so a phase never fails to run because of isolation.
  */
+/** Optional per-invocation execution flags (e.g. M5 recompute forces a
+ *  phase to re-run, bypassing the cross-run cache so the result refreshes). */
+interface PhaseExecOpts {
+	/** Bypass the cache entirely (within-run prior AND cross-run store) and
+	 *  re-execute. Used by `/tf recompute` on the seeded phase so its new
+	 *  output — and only the downstream whose inputHash actually moves — refreshes. */
+	forceRerun?: boolean;
+}
+
 async function executePhase(
 	phase: Phase,
 	state: RunState,
@@ -581,10 +591,11 @@ async function executePhase(
 	prior: PhaseState | undefined,
 	emitProgress: () => void,
 	_retryDepth = 0,
+	opts?: PhaseExecOpts,
 ): Promise<PhaseState> {
 	// Non-keyword cwd (or none): no workspace lifecycle — run directly.
 	if (!isWorkspaceKeyword(phase.cwd)) {
-		return executePhaseInner(phase, state, deps, prior, emitProgress, _retryDepth);
+		return executePhaseInner(phase, state, deps, prior, emitProgress, _retryDepth, opts);
 	}
 	let ws: Workspace | undefined;
 	try {
@@ -599,7 +610,7 @@ async function executePhase(
 	}
 	const innerDeps: RuntimeDeps = ws ? { ...deps, _cwdOverride: ws.dir } : deps;
 	try {
-		const ps = await executePhaseInner(phase, state, innerDeps, prior, emitProgress, _retryDepth);
+		const ps = await executePhaseInner(phase, state, innerDeps, prior, emitProgress, _retryDepth, opts);
 		if (ws && (ws.kind !== "inherited" || ws.note)) {
 			const tag = ws.kind === "inherited" ? "workspace" : `workspace:${ws.kind}`;
 			const msg = ws.note ? `${tag} — ${ws.note}` : `${tag} at ${ws.dir}`;
@@ -622,6 +633,7 @@ async function executePhaseInner(
 	prior: PhaseState | undefined,
 	emitProgress: () => void,
 	_retryDepth = 0,
+	opts?: PhaseExecOpts,
 ): Promise<PhaseState> {
 	const type = phase.type ?? "agent";
 	const concurrency = phase.concurrency ?? state.def.concurrency ?? 8;
@@ -678,6 +690,7 @@ async function executePhaseInner(
 		flowName: state.flowName,
 		runId: state.runId,
 		flowDefHash: state.flowDefHash,
+		forceRerun: opts?.forceRerun,
 		thinking: phase.thinking,
 		tools: phase.tools,
 		preRead,
@@ -951,7 +964,7 @@ async function executePhaseInner(
 					for (const depId of phase.dependsOn ?? []) {
 						const d = state.def.phases.find((p) => p.id === depId);
 						if (!d) continue;
-						const dPs = await executePhase(d, state, depsForUpstream, prior, emitProgress, _retryDepth + 1);
+						const dPs = await executePhase(d, state, depsForUpstream, prior, emitProgress, _retryDepth + 1, undefined);
 						state.phases[depId] = dPs;
 					}
 				}
@@ -1547,6 +1560,11 @@ interface PhaseCacheCtx {
 	 *  key so two structurally-different flows that share a name can never
 	 *  collide, and a changed flow never serves a stale cross-run hit. */
 	flowDefHash?: string;
+	/** Force this phase to re-execute, ignoring the within-run prior AND the
+	 *  cross-run store (M5 recompute seed). Downstream phases are NOT forced —
+	 *  they re-evaluate naturally: if the seed's new output changed their
+	 *  inputHash they miss and re-run, otherwise they hit (early cutoff). */
+	forceRerun?: boolean;
 }
 
 /** Fold the phase fingerprint into the base hash parts to form the final cache key. */
@@ -1575,6 +1593,7 @@ function cacheKey(cc: PhaseCacheCtx, baseParts: string[]): string {
  */
 function cachedPhase(cc: PhaseCacheCtx, inputHash: string): PhaseState | null {
 	if (cc.scope === "off") return null;
+	if (cc.forceRerun) return null;
 
 	// 1. within-run resume (fastest; always allowed unless scope is off)
 	if (cc.prior && cc.prior.status === "done" && cc.prior.inputHash === inputHash) {
@@ -1740,6 +1759,101 @@ function safeProgress(deps: RuntimeDeps, state: RunState): void {
 /**
  * Execute a full taskflow. Mutates and persists `state` as it progresses.
  */
+/** Result of a recompute: what was (or would be) re-executed vs reused.
+ *  `cutoff` is the prize — phases in the stale frontier whose inputHash did
+ *  NOT move, so they hit their cached result instead of re-running (early
+ *  cutoff). That is what makes recompute cheaper than a full re-run. */
+export interface RecomputeReport {
+	readonly dryRun: boolean;
+	readonly aborted: boolean;
+	readonly seeds: readonly string[];
+	/** Phases that were (dry-run: would be) re-executed, or whose result moved. */
+	readonly rerun: readonly string[];
+	/** Phases outside the frontier — untouched, reused verbatim. */
+	readonly reused: readonly string[];
+	/** Phases in the frontier whose inputHash did NOT move → cached result
+	 *  reused, no re-execution (early cutoff). Empty in dry-run (unknowable). */
+	readonly cutoff: readonly string[];
+}
+
+/** Recompute a completed run minimally: force-rerun the `seeds`, then walk
+ *  their stale frontier in topological order. The cache provides early cutoff
+ *  for free — a downstream whose inputHash didn't move (because the seed's new
+ *  output happened to equal the old) hits its prior and is reused rather than
+ *  re-executed. `dryRun` computes the worst-case frontier without spending a
+ *  token. Returns the (possibly updated) state + a report. Never throws into
+ *  the caller — a failing phase is recorded as re-run-but-failed. */
+export async function recomputeTaskflow(
+	state: RunState,
+	deps: RuntimeDeps,
+	seeds: readonly string[],
+	opts: { dryRun?: boolean } = {},
+): Promise<{ report: RecomputeReport; state: RunState }> {
+	const reads = readMapOf(state.phases);
+	const frontier = computeStaleFrontier(reads, seeds);
+	const allIds = Object.keys(state.phases);
+
+	if (opts.dryRun) {
+		return {
+			report: {
+				dryRun: true,
+				aborted: false,
+				seeds,
+				rerun: [...frontier],
+				reused: allIds.filter((id) => !frontier.has(id)),
+				cutoff: [],
+			},
+			state,
+		};
+	}
+
+	// Real recompute: topological order over the frontier so a downstream always
+	// sees its (already-refreshed) upstreams when it re-evaluates its cache key.
+	const seedSet = new Set(seeds);
+	const order = topoLayers(state.def.phases)
+		.flat()
+		.map((p) => p.id)
+		.filter((id) => frontier.has(id));
+	const rerun: string[] = [];
+	const cutoff: string[] = [];
+	const noop = () => {};
+	let aborted = false;
+	for (const id of order) {
+		// H2: honor abort. A partial recompute must NOT be persisted over the
+		// original run — the caller discards `state` when `aborted` is set.
+		if (deps.signal?.aborted) {
+			aborted = true;
+			break;
+		}
+		const phase = state.def.phases.find((p) => p.id === id);
+		if (!phase) continue;
+		const before = state.phases[id]?.inputHash;
+		const execOpts = seedSet.has(id) ? { forceRerun: true } : undefined;
+		try {
+			const ps = await executePhase(phase, state, deps, state.phases[id], noop, 0, execOpts);
+			state.phases[id] = ps;
+			// A phase counts as "rerun" if it was a forced seed OR its result moved;
+			// otherwise it hit its cache (inputHash unchanged) → early cutoff.
+			if (seedSet.has(id) || ps.inputHash !== before) rerun.push(id);
+			else cutoff.push(id);
+		} catch {
+			// A failing recompute phase is recorded as rerun (it was attempted).
+			rerun.push(id);
+		}
+	}
+	return {
+		report: {
+			dryRun: false,
+			aborted,
+			seeds,
+			rerun,
+			reused: allIds.filter((id) => !frontier.has(id)),
+			cutoff,
+		},
+		state,
+	};
+}
+
 export async function executeTaskflow(state: RunState, deps: RuntimeDeps): Promise<RuntimeResult> {
 	const def: Taskflow = state.def;
 	try {

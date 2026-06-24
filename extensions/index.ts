@@ -28,7 +28,7 @@ import { type AgentScope, discoverAgents, readSubagentSettings, shouldSyncBuilti
 import { renderRunResult, summarizeRun } from "./render.ts";
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
 import { ApprovalViewComponent, type ApprovalChoice } from "./approval-view.ts";
-import { executeTaskflow, type ApprovalDecision, type ApprovalRequest, type RuntimeResult } from "./runtime.ts";
+import { executeTaskflow, recomputeTaskflow, type ApprovalDecision, type ApprovalRequest, type RecomputeReport, type RuntimeDeps, type RuntimeResult } from "./runtime.ts";
 import { finalPhase, resolveArgs, type Taskflow, validateTaskflow, desugar, isShorthand } from "./schema.ts";
 import {
 	getFlow,
@@ -84,7 +84,7 @@ const ShorthandStep = Type.Object(
 );
 
 const TaskflowParams = Type.Object({
-	action: StringEnum(["run", "save", "resume", "list", "agents", "init", "verify", "compile", "provenance", "why-stale", "cache-clear"] as const, {
+	action: StringEnum(["run", "save", "resume", "list", "agents", "init", "verify", "compile", "provenance", "why-stale", "recompute", "cache-clear"] as const, {
 		description: "What to do: run a flow, save a definition, resume a paused run, list saved flows, list available agents, init model role configuration, verify the DAG, compile the DAG to a Mermaid diagram + verification report, or clear the cross-run memoization cache",
 		default: "run",
 	}),
@@ -124,7 +124,8 @@ const TaskflowParams = Type.Object({
 	),
 	args: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Invocation arguments for the flow" })),
 	runId: Type.Optional(Type.String({ description: "Run id to resume (for action=resume)" })),
-	phaseId: Type.Optional(Type.String({ description: "Phase id — the assumed-changed seed for action=why-stale" })),
+	phaseId: Type.Optional(Type.String({ description: "Phase id — the assumed-changed seed for action=why-stale, or the phase to re-run for action=recompute" })),
+	dryRun: Type.Optional(Type.Boolean({ description: "For action=recompute: compute the stale frontier without re-executing anything (no tokens spent). Defaults to true (safe); set false to actually re-run the seed + stale frontier and persist the updated run" })),
 	scope: Type.Optional(
 		StringEnum(["user", "project"] as const, { description: "Where to save (action=save)", default: "project" }),
 	),
@@ -171,6 +172,19 @@ function formatProvenance(run: RunState): string {
 			lines.push("   (source — no upstream reads)");
 		}
 	}
+	return lines.join("\n");
+}
+
+function formatRecompute(r: RecomputeReport): string {
+	const lines: string[] = [];
+	lines.push(`Recompute — seed: ${r.seeds.join(", ")}${r.dryRun ? "  (DRY RUN — worst-case, no execution)" : ""}`);
+	lines.push("");
+	lines.push(`▲ re-run (${r.rerun.length}): ${r.rerun.join(", ") || "—"}`);
+	if (!r.dryRun) {
+		lines.push(`✂ early-cutoff (cached — inputHash unchanged): ${r.cutoff.join(", ") || "—"}`);
+		if (r.cutoff.length > 0) lines.push(`   → saved ${r.cutoff.length} re-execution(s).`);
+	}
+	lines.push(`✓ reused (outside frontier): ${r.reused.join(", ") || "—"}`);
 	return lines.join("\n");
 }
 
@@ -681,6 +695,36 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			if (action === "recompute") {
+				if (!params.runId)
+					return errorResult(action, "action=recompute requires 'runId'");
+				if (!params.phaseId)
+					return errorResult(action, "action=recompute requires 'phaseId' (the seed phase to re-run)");
+				const prev = loadRun(ctx.cwd, params.runId);
+				if (!prev) return errorResult(action, `Run not found: ${params.runId}`);
+				// H1: the LLM-callable tool defaults to a SAFE dry-run (no tokens, no
+				// mutation). A real recompute — which spends money and overwrites the
+				// run — requires an explicit dryRun:false.
+				const dryRun = params.dryRun !== false;
+				const settings = readSubagentSettings();
+				const { agents } = discoverAgents(ctx.cwd, prev.def.agentScope ?? "user", settings.modelRoles, settings.taskflow);
+				const deps: RuntimeDeps = {
+					cwd: ctx.cwd,
+					agents,
+					globalThinking: settings.globalThinking,
+					signal,
+					loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
+				};
+				const { report, state } = await recomputeTaskflow(prev, deps, [String(params.phaseId)], { dryRun });
+				// H2: never persist a partial/aborted recompute over the original run.
+				if (!dryRun && !report.aborted) saveRun(state, { maxKeep: settings.taskflow.maxKeptRuns, maxAgeDays: settings.taskflow.maxRunAgeDays });
+				const prefix = report.aborted ? "⚠ ABORTED mid-recompute — original run left unchanged.\n\n" : "";
+				return {
+					content: [{ type: "text", text: prefix + formatRecompute(report) }],
+					details: { action } satisfies TaskflowDetails,
+				};
+			}
+
 			// resolve the definition: inline `define` / shorthand (single|parallel|chain), else saved `name`.
 			let def: Taskflow | undefined;
 
@@ -874,7 +918,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("tf", {
 		description: "Taskflow: list | run <name> | show <name> | compile <name> | runs | init",
 		getArgumentCompletions: (prefix) => {
-			const subs = ["list", "run", "show", "runs", "resume", "init", "save", "verify", "compile", "provenance", "why-stale"];
+			const subs = ["list", "run", "show", "runs", "resume", "init", "save", "verify", "compile", "provenance", "why-stale", "recompute"];
 			const items = subs.map((s) => ({ value: s, label: s }));
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
@@ -957,6 +1001,39 @@ export default function (pi: ExtensionAPI) {
 				}
 				const reads = readMapOf(run.phases);
 				ctx.ui.notify(formatWhyStale(run.runId, run.flowName, reads, rest), "info");
+				return;
+			}
+
+			if (sub === "recompute") {
+				const tokens = (arg ?? "").trim().split(/\s+/).filter(Boolean);
+				const rid = tokens[0];
+				const seed = tokens.find((t) => t !== rid && !t.startsWith("--"));
+				const apply = tokens.includes("--apply");
+				if (!rid || !seed) {
+					ctx.ui.notify("Usage: /tf recompute <runId> <phaseId> [--apply]\n(default is a safe dry-run; --apply spends tokens)", "warning");
+					return;
+				}
+				const prev = loadRun(ctx.cwd, rid);
+				if (!prev) {
+					ctx.ui.notify(`Run not found: ${rid}`, "error");
+					return;
+				}
+				const settings = readSubagentSettings();
+				const { agents } = discoverAgents(ctx.cwd, prev.def.agentScope ?? "user", settings.modelRoles, settings.taskflow);
+				const deps: RuntimeDeps = {
+					cwd: ctx.cwd,
+					agents,
+					globalThinking: settings.globalThinking,
+					loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
+				};
+				if (apply) {
+					const { report, state } = await recomputeTaskflow(prev, deps, [seed], { dryRun: false });
+					if (!report.aborted) saveRun(state, { maxKeep: settings.taskflow.maxKeptRuns, maxAgeDays: settings.taskflow.maxRunAgeDays });
+					ctx.ui.notify(formatRecompute(report), report.aborted ? "warning" : "info");
+				} else {
+					const { report } = await recomputeTaskflow(prev, deps, [seed], { dryRun: true });
+					ctx.ui.notify(formatRecompute(report), "info");
+				}
 				return;
 			}
 
