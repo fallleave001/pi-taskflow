@@ -288,6 +288,28 @@ test("runtime: cross-run reuses an identical phase across two runs ($0 hit)", as
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("runtime: deps.cacheScopeDefault='cross-run' makes the default scope cross-run", async () => {
+	const dir = tmpDir();
+	const def: Taskflow = {
+		name: "cr-default",
+		phases: [{ id: "p", type: "agent", agent: "a", task: "fixed", final: true }],
+	};
+	const counter = { n: 0 };
+	const store = new CacheStore(dir);
+	const deps: RuntimeDeps = {
+		cwd: dir,
+		agents: AGENTS,
+		runTask: countingRunner(counter),
+		cacheStore: store,
+		cacheScopeDefault: "cross-run",
+	};
+
+	await executeTaskflow(mkState(def, dir), deps);
+	await executeTaskflow(mkState(def, dir), deps);
+	assert.equal(counter.n, 1, "default cross-run scope must reuse across runs");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("runtime: cross-run does NOT leak across different flows sharing a phase id (P0-1)", async () => {
 	const dir = tmpDir();
 	const store = new CacheStore(dir);

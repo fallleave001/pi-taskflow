@@ -57,6 +57,8 @@ export interface RuntimeDeps {
 	loadFlow?: (name: string) => Taskflow | undefined;
 	/** Cross-run memoization store. Omit to construct a default one for `deps.cwd`. */
 	cacheStore?: CacheStore;
+	/** Default cache scope for phases that don't specify one. */
+	cacheScopeDefault?: CacheScope;
 	/** Internal: sub-flow call stack, for recursion detection. */
 	_stack?: string[];
 	/** Internal: pre-resolved Shared Context Tree dir for this run (sub-flows inherit the parent's). */
@@ -679,7 +681,7 @@ async function executePhaseInner(
 	// Resolve this phase's cache policy once. Default scope is "run-only" (the
 	// historical within-run resume behavior). Only "cross-run" phases resolve a
 	// fingerprint and consult the persistent store.
-	const cacheScope: CacheScope = (phase.cache?.scope ?? "run-only") as CacheScope;
+	const cacheScope: CacheScope = (phase.cache?.scope ?? deps.cacheScopeDefault ?? "run-only") as CacheScope;
 	const cc: PhaseCacheCtx = {
 		scope: cacheScope,
 		ttlMs: phase.cache?.ttl ? (parseTtlMs(phase.cache.ttl) ?? undefined) : undefined,
@@ -1052,7 +1054,8 @@ async function executePhaseInner(
 	}
 
 	if (type === "approval") {
-		const ctx = buildInterpolationContext(state, previousOutput);
+		const readRefs: string[] = [];
+		const ctx = buildInterpolationContext(state, previousOutput, undefined, (ref) => readRefs.push(ref));
 		const message = interpolate(phase.task ?? "Approve to continue?", ctx).text;
 		const inputHash = cacheKey(cc, [phase.id, phase.model ?? "", "approval", message]);
 		const cached = cachedPhase(cc, inputHash);
@@ -1070,6 +1073,7 @@ async function executePhaseInner(
 				gate: { verdict: "block", reason: "(auto-rejected: no interactive approver available)" },
 				usage: emptyUsage(),
 				inputHash,
+				reads: readRefsToReads(readRefs, state),
 				endedAt: Date.now(),
 			};
 		}
@@ -1082,6 +1086,7 @@ async function executePhaseInner(
 			approval: { decision: decision.decision, note },
 			usage: emptyUsage(),
 			inputHash,
+			reads: readRefsToReads(readRefs, state),
 			endedAt: Date.now(),
 		};
 		// A rejection halts the flow via the same mechanism as a blocking gate.
@@ -1092,7 +1097,8 @@ async function executePhaseInner(
 	}
 
 	if (type === "flow") {
-		const ctx = buildInterpolationContext(state, previousOutput);
+		const readRefs: string[] = [];
+		const ctx = buildInterpolationContext(state, previousOutput, undefined, (ref) => readRefs.push(ref));
 		const hasDef = (phase as { def?: unknown }).def !== undefined;
 		const stack = deps._stack ?? [];
 
@@ -1113,6 +1119,7 @@ async function executePhaseInner(
 				json: parseJson ? safeParse("") : undefined,
 				usage: emptyUsage(),
 				inputHash: hashInput(phase.id, `flow-def-error:${diag}`),
+				reads: readRefsToReads(readRefs, state),
 				endedAt: Date.now(),
 				defError: diag,
 			});
@@ -1148,6 +1155,7 @@ async function executePhaseInner(
 					json: parseJson ? safeParse("") : undefined,
 					usage: emptyUsage(),
 					inputHash: hashInput(phase.id, "flow-def-empty"),
+					reads: readRefsToReads(readRefs, state),
 					endedAt: Date.now(),
 				};
 			}
@@ -1269,6 +1277,7 @@ async function executePhaseInner(
 			},
 			error: subResult.ok ? undefined : `sub-flow '${name}' ${subResult.state.status}`,
 			inputHash,
+			reads: readRefsToReads(readRefs, state),
 			endedAt: Date.now(),
 		};
 		recordCache(cc, flowPs);
@@ -1278,6 +1287,7 @@ async function executePhaseInner(
 	// loop-until-done: run the body repeatedly until `until` is truthy, the output
 	// converges to a fixed point, or maxIterations is hit (always terminates).
 	if (type === "loop") {
+		const readRefs: string[] = [];
 		const agentName = resolveAgent(phase.agent, deps, state);
 		const rawMax = phase.maxIterations ?? LOOP_DEFAULT_MAX_ITERATIONS;
 		const maxIters = Math.max(1, Math.min(LOOP_HARD_MAX_ITERATIONS, Math.floor(rawMax)));
@@ -1300,7 +1310,7 @@ async function executePhaseInner(
 			// The body sees its iteration number and the prior iteration's output.
 			const bodyCtx = buildInterpolationContext(state, previousOutput, {
 				loop: { iteration: i, lastOutput, maxIterations: maxIters },
-			});
+			}, (ref) => readRefs.push(ref));
 			const body = preRead + interpolate(phase.task ?? "", bodyCtx).text;
 			const r = await runOne(agentName, body, liveSink(state, phase.id, emitProgress));
 			usages.push(r.usage);
@@ -1317,7 +1327,7 @@ async function executePhaseInner(
 			// Loop locals ({loop.iteration} etc.) are available to the condition too.
 			const untilCtx = buildInterpolationContext(state, previousOutput, {
 				loop: { iteration: i, lastOutput, maxIterations: maxIters },
-			});
+			}, (ref) => readRefs.push(ref));
 			untilCtx.steps[phase.id] = { output: lastOutput, json: safeParse(lastOutput) };
 			const { value: done, error: condErr } = tryEvaluateCondition(phase.until ?? "", untilCtx);
 			// A malformed condition must not spin forever: stop and surface a warning
@@ -1349,6 +1359,7 @@ async function executePhaseInner(
 				loop: { iterations, stop },
 				warnings: loopWarnings.length ? loopWarnings : undefined,
 				inputHash: hashInput(phase.id, "loop", phase.until ?? ""),
+				reads: readRefsToReads(readRefs, state),
 				endedAt: Date.now(),
 			};
 		}
@@ -1361,6 +1372,7 @@ async function executePhaseInner(
 			loop: { iterations, stop },
 			warnings: loopWarnings.length ? loopWarnings : undefined,
 			inputHash: hashInput(phase.id, "loop", phase.until ?? "", String(iterations)),
+			reads: readRefsToReads(readRefs, state),
 			endedAt: Date.now(),
 		};
 	}
@@ -1403,6 +1415,7 @@ async function executePhaseInner(
 				budgetTruncated: budgetSkipCount > 0 || undefined,
 				tournament: { variants: competitors.length, winner: 0, mode },
 				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				reads: readRefsToReads(readRefs, state),
 				endedAt: Date.now(),
 			};
 		}
@@ -1418,6 +1431,7 @@ async function executePhaseInner(
 				budgetTruncated: budgetSkipCount > 0 || undefined,
 				tournament: { variants: competitors.length, winner: ranIdx(ok[0]), mode, reason: "only surviving variant" },
 				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				reads: readRefsToReads(readRefs, state),
 				endedAt: Date.now(),
 			};
 		}
@@ -1435,6 +1449,7 @@ async function executePhaseInner(
 				warnings: ["judge skipped: run aborted or budget exceeded"],
 				tournament: { variants: competitors.length, winner: ranIdx(ok[0]), mode, reason: "judge skipped" },
 				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				reads: readRefsToReads(readRefs, state),
 				endedAt: Date.now(),
 			};
 		}
@@ -1469,6 +1484,7 @@ async function executePhaseInner(
 				warnings: [`judge failed (${judgeRes.errorMessage ?? "error"}); used variant ${ranIdx(ok[0])}`],
 				tournament: { variants: competitors.length, winner: ranIdx(ok[0]), mode, reason: "judge failed" },
 				inputHash: hashInput(phase.id, "tournament", String(competitors.length)),
+				reads: readRefsToReads(readRefs, state),
 				endedAt: Date.now(),
 			};
 		}
@@ -1492,6 +1508,7 @@ async function executePhaseInner(
 			warnings: winnerIneligible ? [`judge picked an ineligible variant; used variant ${winnerIdx}`] : undefined,
 			tournament: { variants: competitors.length, winner: winnerIdx, mode, reason },
 			inputHash: hashInput(phase.id, "tournament", String(competitors.length), mode),
+			reads: readRefsToReads(readRefs, state),
 			endedAt: Date.now(),
 		};
 	}

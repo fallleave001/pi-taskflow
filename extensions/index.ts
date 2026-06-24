@@ -29,6 +29,7 @@ import { renderRunResult, summarizeRun } from "./render.ts";
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
 import { ApprovalViewComponent, type ApprovalChoice } from "./approval-view.ts";
 import { executeTaskflow, recomputeTaskflow, type ApprovalDecision, type ApprovalRequest, type RecomputeReport, type RuntimeDeps, type RuntimeResult } from "./runtime.ts";
+import { type UsageStats } from "./usage.ts";
 import { finalPhase, resolveArgs, type Taskflow, validateTaskflow, desugar, isShorthand } from "./schema.ts";
 import {
 	getFlow,
@@ -61,6 +62,7 @@ interface TaskflowDetails {
 	finalOutput?: string;
 	action: string;
 	message?: string;
+	cacheReport?: string;
 }
 
 /** pi reads `isError` at runtime to mark tool failures; it is not in the public type. */
@@ -334,7 +336,14 @@ async function runFlow(
 			persist: persistThrottled,
 			requestApproval,
 			loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
+			cacheScopeDefault: "cross-run",
 		});
+		// Auto-report cache savings at the end of a real run so the user sees the
+		// M1-M5 effect without running a separate /tf command.
+		if (result.ok) {
+			const report = formatCacheReport(result.state, result.totalUsage);
+			if (report) ctx.ui.notify(report, "info");
+		}
 		return result;
 	} finally {
 		if (heartbeat) clearInterval(heartbeat);
@@ -1282,6 +1291,16 @@ function errorResult(action: string, message: string): ToolResult {
 	};
 }
 
+function formatCacheReport(state: RunState, totalUsage: UsageStats): string {
+	const cached = Object.values(state.phases).filter((p) => p.cacheHit === "cross-run");
+	if (cached.length === 0) return "";
+	const executed = Object.values(state.phases).filter((p) => p.status === "done" && !p.cacheHit).length;
+	const avgTokens = executed > 0 ? Math.round((totalUsage.input + totalUsage.output) / executed) : 0;
+	const savedTokens = avgTokens * cached.length;
+	const savedUSD = executed > 0 ? Math.round((cached.length * (totalUsage.cost ?? 0)) / executed * 1000) / 1000 : 0;
+	return `💾 ${cached.length} phase(s) reused from cross-run cache (~${savedTokens.toLocaleString()} tokens, $${savedUSD.toLocaleString()} saved)`;
+}
+
 function finalResult(action: string, result: RuntimeResult): ToolResult {
 	const fp = finalPhase(result.state.def.phases);
 	const header = result.ok
@@ -1289,7 +1308,7 @@ function finalResult(action: string, result: RuntimeResult): ToolResult {
 		: `Taskflow '${result.state.flowName}' ${result.state.status} (${summarizeRun(result.state)}). Run id: ${result.state.runId} — resume with action=resume.`;
 	return {
 		content: [{ type: "text", text: `${header}\n\n--- ${fp.id} ---\n${result.finalOutput}` }],
-		details: { action, state: result.state, finalOutput: result.finalOutput },
+		details: { action, state: result.state, finalOutput: result.finalOutput, cacheReport: formatCacheReport(result.state, result.totalUsage) },
 		isError: !result.ok,
 	};
 }
