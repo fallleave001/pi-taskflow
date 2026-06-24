@@ -266,3 +266,74 @@ test("recompute: tournament inputHash folds upstream so changed seed re-runs tou
 	assert.equal(report.cutoff.length, 0, "tournament is not wrongly cut off");
 	assert.ok(record.length > executedBefore + 1, "tournament spawned competitors again");
 });
+
+test("recompute: observed-read edges are respected even without declared dependsOn", async () => {
+	const record: string[] = [];
+	let scoutVersion = "V1";
+	// B reads A via interpolation but declares no dependsOn edge. With
+	// concurrency=1 the original run executes them sequentially, so B actually
+	// resolves A and records an observed read. The recompute ordering must
+	// still run A before B, otherwise B evaluates its cache key against the
+	// stale A and is falsely marked as early-cutoff.
+	const def: Taskflow = {
+		name: "implicit-dep",
+		concurrency: 1,
+		phases: [
+			{ id: "scout", type: "agent", agent: "a", task: "scan" },
+			{ id: "consumer", type: "agent", agent: "a", task: "consume {steps.scout.output}" },
+		],
+	} as Taskflow;
+	const deps = baseDeps(
+		mockRunner((t) => (t.includes("scan") ? `out:${scoutVersion}` : `out:${t}`), record),
+	);
+	const state = mkState(def);
+	await executeTaskflow(state, deps);
+	const executedBefore = record.length;
+
+	scoutVersion = "V2";
+	const { report } = await recomputeTaskflow(state, deps, ["scout"], { dryRun: false });
+
+	assert.ok(report.rerun.includes("scout"), "seed re-ran");
+	assert.ok(report.rerun.includes("consumer"), "consumer re-ran because its observed upstream changed");
+	assert.equal(report.cutoff.length, 0, "no false early cutoff");
+	assert.equal(record.length, executedBefore + 2, "exactly two re-executions");
+});
+
+test("recompute: dryRun:false rejects {previous.output} as unobserved dependency", async () => {
+	const record: string[] = [];
+	const deps = baseDeps(mockRunner((t) => `out:${t}`, record));
+	const def: Taskflow = {
+		name: "previous-chain",
+		phases: [
+			{ id: "a", type: "agent", agent: "a", task: "first" },
+			{ id: "b", type: "agent", agent: "a", task: "second {previous.output}" },
+		],
+	} as Taskflow;
+	const state = mkState(def);
+	await executeTaskflow(state, deps);
+
+	await assert.rejects(
+		() => recomputeTaskflow(state, deps, ["a"], { dryRun: false }),
+		/unsafe for this run/,
+		"real recompute must refuse flows with {previous.output} deps",
+	);
+});
+
+test("recompute: does not mutate the caller's RunState", async () => {
+	const record: string[] = [];
+	let scoutVersion = "V1";
+	const deps = baseDeps(
+		mockRunner((t) => (t === "scan" ? `out:${scoutVersion}` : `out:${t}`), record),
+	);
+	const state = mkState(DEF);
+	await executeTaskflow(state, deps);
+	const scoutBefore = state.phases.scout;
+
+	scoutVersion = "V2";
+	const { state: newState } = await recomputeTaskflow(state, deps, ["scout"], { dryRun: false });
+
+	// Reference equality proves the caller's RunState object was not mutated.
+	assert.equal(state.phases.scout, scoutBefore, "original state object untouched");
+	assert.equal(state.phases.scout.output, scoutBefore.output, "original output unchanged");
+	assert.equal(newState.phases.scout.output, "out:V2", "new state reflects recompute");
+});

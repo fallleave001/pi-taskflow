@@ -87,7 +87,7 @@ const ShorthandStep = Type.Object(
 
 const TaskflowParams = Type.Object({
 	action: StringEnum(["run", "save", "resume", "list", "agents", "init", "verify", "compile", "provenance", "why-stale", "recompute", "cache-clear"] as const, {
-		description: "What to do: run a flow, save a definition, resume a paused run, list saved flows, list available agents, init model role configuration, verify the DAG, compile the DAG to a Mermaid diagram + verification report, or clear the cross-run memoization cache",
+		description: "What to do: run a flow, save a definition, resume a paused run, list saved flows, list available agents, init model role configuration, verify the DAG, compile the DAG to a Mermaid diagram + verification report, show observed readSet provenance, explain why a run is stale, minimally recompute a stale run, or clear the cross-run memoization cache",
 		default: "run",
 	}),
 	name: Type.Optional(Type.String({ description: "Name of a saved flow (for run/save without inline define)" })),

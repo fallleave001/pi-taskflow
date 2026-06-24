@@ -676,6 +676,24 @@ async function executePhaseInner(
 		readRefs.push(ref);
 	};
 	const ctx = buildInterpolationContext(state, previousOutput, undefined, onRead);
+
+	// M3 observed-readSet: when conditions are part of the phase's real
+	// dependencies. Evaluate them inside executePhaseInner so every upstream
+	// interpolation is captured by the shared onRead hook, not silently dropped
+	// by a separate out-of-band context.
+	if (phase.when !== undefined) {
+		if (!evaluateCondition(phase.when, ctx)) {
+			return {
+				id: phase.id,
+				status: "skipped",
+				error: `Condition not met: ${phase.when}`,
+				endedAt: Date.now(),
+				usage: emptyUsage(),
+				reads: readRefsToReads(readRefs, state),
+			};
+		}
+	}
+
 	const preRead = await resolvePhaseContext(phase, ctx);
 
 	// Resolve this phase's cache policy once. Default scope is "run-only" (the
@@ -880,7 +898,7 @@ async function executePhaseInner(
 	if (type === "agent" || type === "gate" || type === "reduce") {
 		// Eval gate: zero-token machine checks before the LLM gate.
 		if (type === "gate" && Array.isArray(phase.eval) && phase.eval.length > 0) {
-			const evalCtx = buildInterpolationContext(state, previousOutput);
+			const evalCtx = buildInterpolationContext(state, previousOutput, undefined, onRead);
 			let allPassed = true;
 			for (const check of phase.eval) {
 				let expr = check;
@@ -915,6 +933,7 @@ async function executePhaseInner(
 					inputHash,
 					endedAt: Date.now(),
 				};
+				if (readRefs.length) ps.reads = readRefsToReads(readRefs, state);
 				recordCache(cc, ps);
 				return ps;
 			}
@@ -1835,13 +1854,33 @@ export interface RecomputeReport {
 	readonly cutoff: readonly string[];
 }
 
+/** Scan a flow for dependencies that cannot be observed through the readSet.
+ *  These include Shared Context Tree, sub-flows, context: file pre-reads, and
+ *  interpolation placeholders that do not resolve through `steps.*` (previous,
+ *  args, item). Recomputing flows with such deps with dryRun:false risks
+ *  silently reusing stale upstream state. */
+function hasUnobservedDependencies(state: RunState): boolean {
+	const scan = (text: string): boolean => /\{(previous\.output|args\.|item\b|item\.)/.test(text);
+	for (const p of state.def.phases) {
+		if (p.shareContext === true) return true;
+		if (state.def.contextSharing === true) return true;
+		if (p.type === "flow") return true;
+		if (p.context && p.context.length > 0) return true;
+		if (scan(p.task ?? "")) return true;
+		if (p.when && scan(p.when)) return true;
+		if (Array.isArray(p.eval) && p.eval.some(scan)) return true;
+	}
+	return false;
+}
+
 /** Recompute a completed run minimally: force-rerun the `seeds`, then walk
  *  their stale frontier in topological order. The cache provides early cutoff
  *  for free — a downstream whose inputHash didn't move (because the seed's new
  *  output happened to equal the old) hits its prior and is reused rather than
  *  re-executed. `dryRun` computes the worst-case frontier without spending a
- *  token. Returns the (possibly updated) state + a report. Never throws into
- *  the caller — a failing phase is recorded as re-run-but-failed. */
+ *  token. Returns a fresh state + a report. Throws only when dryRun:false is
+ *  requested for a flow with unobserved dependencies; callers should surface
+ *  that as a user-facing error. */
 export async function recomputeTaskflow(
 	state: RunState,
 	deps: RuntimeDeps,
@@ -1850,9 +1889,12 @@ export async function recomputeTaskflow(
 	// The tool/command wrappers can explicitly opt into dryRun:false.
 	opts: { dryRun?: boolean } = { dryRun: true },
 ): Promise<{ report: RecomputeReport; state: RunState }> {
-	const reads = readMapOf(state.phases);
+	// Never mutate the caller's RunState in-place. Recompute is a speculative
+	// replay; only the caller decides whether to persist the new state.
+	const newState = structuredClone(state) as RunState;
+	const reads = readMapOf(newState.phases);
 	const frontier = computeStaleFrontier(reads, seeds);
-	const allIds = Object.keys(state.phases);
+	const allIds = Object.keys(newState.phases);
 
 	if (opts.dryRun) {
 		return {
@@ -1864,35 +1906,43 @@ export async function recomputeTaskflow(
 				reused: allIds.filter((id) => !frontier.has(id)),
 				cutoff: [],
 			},
-			state,
+			state: newState,
 		};
 	}
 
-	// Real recompute: topological order over the frontier so a downstream always
-	// sees its (already-refreshed) upstreams when it re-evaluates its cache key.
-	const seedSet = new Set(seeds);
-
 	// Guard: observed readSet only tracks `{steps.X.*}` interpolation refs. It is
 	// blind to Shared Context Tree (ctx_read/ctx_write), sub-flow internals,
-	// context: file pre-reads, and {previous.output}. Recomputing such a run
-	// with dryRun:false could silently skip phases whose deps changed outside the
-	// observed frontier and then persist a corrupted run over the original.
-	const hasUnobservedDeps = state.def.phases.some(
-		(p) =>
-			p.shareContext === true ||
-			state.def.contextSharing === true ||
-			p.type === "flow" ||
-			(p.context && p.context.length > 0),
-	);
-	if (hasUnobservedDeps) {
+	// context: file pre-reads, {previous.output}, and loop locals ({args.*},
+	// {item.*}). Recomputing such a run with dryRun:false could silently skip
+	// phases whose deps changed outside the observed frontier and then persist a
+	// corrupted run over the original.
+	if (hasUnobservedDependencies(newState)) {
 		throw new Error(
 			"recompute dryRun:false is unsafe for this run: it contains dependencies " +
-				"(shareContext, flow/ctx_spawn, context: files, or {previous.output}) " +
+				"(shareContext, flow/ctx_spawn, context: files, {previous.output}, {args.*}, or {item.*}) " +
 				"that are not tracked by the observed readSet. Use dryRun:true to inspect " +
 				"the frontier, or change the upstream phase and re-run the whole flow.",
 		);
 	}
-	const order = topoLayers(state.def.phases)
+
+	// Real recompute: topological order over the frontier so a downstream always
+	// sees its (already-refreshed) upstreams when it re-evaluates its cache key.
+	// The order must respect both declared dependsOn AND observed reads, because
+	// pi-taskflow allows interpolation refs without an explicit dependsOn edge.
+	const seedSet = new Set(seeds);
+	function observedDeps(phaseId: string): string[] {
+		// A phase reading its own prior output (e.g. a loop `until` checking
+		// `{steps.thisId.output}`) must not create a self-edge in the scheduling
+		// graph — otherwise topoLayers would deadlock on the self-loop.
+		return (newState.phases[phaseId]?.reads ?? [])
+			.map((r) => r.stepId)
+			.filter((id) => id !== phaseId);
+	}
+	const augmentedPhases = newState.def.phases.map((p) => ({
+		...p,
+		dependsOn: [...new Set([...(p.dependsOn ?? []), ...observedDeps(p.id)])],
+	}));
+	const order = topoLayers(augmentedPhases)
 		.flat()
 		.map((p) => p.id)
 		.filter((id) => frontier.has(id));
@@ -1901,19 +1951,19 @@ export async function recomputeTaskflow(
 	const noop = () => {};
 	let aborted = false;
 	for (const id of order) {
-		// H2: honor abort. A partial recompute must NOT be persisted over the
-		// original run — the caller discards `state` when `aborted` is set.
+		// A partial recompute must NOT be persisted over the original run — the
+		// caller discards `state` when `aborted` is set.
 		if (deps.signal?.aborted) {
 			aborted = true;
 			break;
 		}
-		const phase = state.def.phases.find((p) => p.id === id);
+		const phase = newState.def.phases.find((p) => p.id === id);
 		if (!phase) continue;
-		const before = state.phases[id]?.inputHash;
+		const before = newState.phases[id]?.inputHash;
 		const execOpts = seedSet.has(id) ? { forceRerun: true } : undefined;
 		try {
-			const ps = await executePhase(phase, state, deps, state.phases[id], noop, 0, execOpts);
-			state.phases[id] = ps;
+			const ps = await executePhase(phase, newState, deps, newState.phases[id], noop, 0, execOpts);
+			newState.phases[id] = ps;
 			// A phase counts as "rerun" if it was a forced seed OR its result moved;
 			// otherwise it hit its cache (inputHash unchanged) → early cutoff.
 			if (seedSet.has(id) || ps.inputHash !== before) rerun.push(id);
@@ -1932,7 +1982,7 @@ export async function recomputeTaskflow(
 			reused: allIds.filter((id) => !frontier.has(id)),
 			cutoff,
 		},
-		state,
+		state: newState,
 	};
 }
 
@@ -2023,10 +2073,6 @@ async function runTaskflowLayers(state: RunState, deps: RuntimeDeps): Promise<Ru
 			else if (budgetBlocked) skipReason = `Budget exceeded${budgetReason ? `: ${budgetReason}` : ""}`;
 			else if (!depsSatisfied)
 				skipReason = join === "any" ? "All dependencies failed or were skipped" : "Upstream dependency not satisfied";
-			else if (phase.when !== undefined) {
-				const condCtx = buildInterpolationContext(state, lastCompletedOutput(state, phase));
-				if (!evaluateCondition(phase.when, condCtx)) skipReason = `Condition not met: ${phase.when}`;
-			}
 
 			if (skipReason) {
 				if (skipReason.startsWith("Budget exceeded")) budgetBlocked = true;
