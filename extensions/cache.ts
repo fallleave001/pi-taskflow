@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { cacheDir, withLock, writeFileAtomic } from "./store.ts";
+import { cacheDir, withLock, writeFileAtomic, type PhaseState } from "./store.ts";
 
 // ---------------------------------------------------------------------------
 // Fingerprint resolution
@@ -144,6 +144,11 @@ export interface CacheEntry {
 	output?: string;
 	json?: unknown;
 	model?: string;
+	/** Full PhaseState payload preserved so cross-run reuse is semantically
+	 *  equivalent to within-run resume. Storing only output/json would drop
+	 *  `gate`, `approval`, `reads`, `loop`, `tournament`, `warnings`, etc.,
+	 *  breaking recompute soundness and gate-block detection. */
+	state?: PhaseState;
 	/** Provenance for audit / cleanup. */
 	flowName?: string;
 	phaseId?: string;

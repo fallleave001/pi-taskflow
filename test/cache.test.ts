@@ -310,6 +310,81 @@ test("runtime: deps.cacheScopeDefault='cross-run' makes the default scope cross-
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("runtime: gate/approval/loop/tournament stay run-only even when default is cross-run", async () => {
+	const dir = tmpDir();
+	const def: Taskflow = {
+		name: "blocked-types",
+		phases: [
+			{ id: "scout", type: "agent", agent: "a", task: "scan" },
+			{ id: "g", type: "gate", agent: "a", task: "gate {steps.scout.output}", dependsOn: ["scout"] },
+			{ id: "ap", type: "approval", task: "approve {steps.scout.output}", dependsOn: ["scout"] },
+			{ id: "lp", type: "loop", agent: "a", maxIterations: 2, task: "loop {steps.scout.output}", dependsOn: ["scout"] },
+			{ id: "tr", type: "tournament", agent: "a", variants: 2, mode: "best", task: "tourney {steps.scout.output}", dependsOn: ["scout"] },
+		],
+	} as Taskflow;
+	const counter = { n: 0 };
+	const store = new CacheStore(dir);
+	const deps: RuntimeDeps = {
+		cwd: dir,
+		agents: AGENTS,
+		runTask: countingRunner(counter),
+		cacheStore: store,
+		cacheScopeDefault: "cross-run",
+	};
+
+	await executeTaskflow(mkState(def, dir), deps);
+	const s2 = await executeTaskflow(mkState(def, dir), deps);
+	// All blocked types must be fresh each run; only scout may reuse.
+	for (const id of ["g", "ap", "lp", "tr"]) {
+		assert.equal(s2.state.phases[id].cacheHit, undefined, `${id} must not be a cross-run cache hit`);
+	}
+	assert.equal(s2.state.phases.scout.cacheHit, "cross-run", "agent phase may reuse under cross-run default");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("runtime: cross-run CacheEntry preserves full PhaseState (gate, reads, loop, tournament)", async () => {
+	const dir = tmpDir();
+	const def: Taskflow = {
+		name: "preserve-state",
+		phases: [
+			{ id: "scout", type: "agent", agent: "a", task: "scan", output: "json" },
+			{
+				id: "audit",
+				type: "agent",
+				agent: "a",
+				task: "audit {steps.scout.output}",
+				cache: { scope: "cross-run" },
+				dependsOn: ["scout"],
+			},
+		],
+	} as Taskflow;
+	const store = new CacheStore(dir);
+	const deps: RuntimeDeps = {
+		cwd: dir,
+		agents: AGENTS,
+		runTask: async (cwd, ag, agentName, task) => ({
+			agent: agentName,
+			task,
+			exitCode: 0,
+			output: task,
+			stderr: "",
+			usage: { ...emptyUsage(), output: 10, cost: 0.001, turns: 1 },
+			stopReason: "end",
+		}),
+		cacheStore: store,
+	};
+
+	const s1 = await executeTaskflow(mkState(def, dir), deps);
+	const firstReads = s1.state.phases.audit.reads;
+	assert.ok(firstReads && firstReads.some((r) => r.stepId === "scout"), "audit should record reads");
+
+	const s2 = await executeTaskflow(mkState(def, dir), deps);
+	assert.equal(s2.state.phases.audit.cacheHit, "cross-run", "audit hit cross-run cache");
+	// The restored PhaseState must carry the same reads (and any other surface).
+	assert.deepEqual(s2.state.phases.audit.reads, firstReads, "cached PhaseState preserves reads");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("runtime: cross-run does NOT leak across different flows sharing a phase id (P0-1)", async () => {
 	const dir = tmpDir();
 	const store = new CacheStore(dir);

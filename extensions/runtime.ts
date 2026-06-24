@@ -680,10 +680,16 @@ async function executePhaseInner(
 
 	// Resolve this phase's cache policy once. Default scope is "run-only" (the
 	// historical within-run resume behavior). Only "cross-run" phases resolve a
-	// fingerprint and consult the persistent store. If flowDefHash failed we
-	// force run-only: using a degraded flowName-only key would reopen the
-	// cross-flow collision hole.
+	// fingerprint and consult the persistent store.
 	let cacheScope: CacheScope = (phase.cache?.scope ?? deps.cacheScopeDefault ?? "run-only") as CacheScope;
+	// Defense in depth: gate/approval/loop/tournament must produce a fresh result
+	// each run (schema already rejects explicit cross-run, but the default-scope
+	// path must also be blocked). If flowDefHash failed, cross-run is unsafe
+	// because the key degrades to flowName-only and reopens cross-flow collisions.
+	const CROSS_RUN_BLOCKED_TYPES = new Set(["gate", "approval", "loop", "tournament"]);
+	if (cacheScope === "cross-run" && CROSS_RUN_BLOCKED_TYPES.has(type)) {
+		cacheScope = "run-only";
+	}
 	if (state.flowDefHash === "failed" && cacheScope === "cross-run") {
 		cacheScope = "run-only";
 	}
@@ -1649,6 +1655,13 @@ function cachedPhase(cc: PhaseCacheCtx, inputHash: string): PhaseState | null {
 	if (cc.scope === "cross-run") {
 		const e = cc.store.get(inputHash, cc.ttlMs);
 		if (e) {
+			// If we stored the full PhaseState, restore it (preserving gate,
+			// approval, reads, loop/tournament metadata, warnings) and just mark
+			// the cache hit + zero usage. Fallback to the legacy trimmed surface
+			// for entries written before this change.
+			if (e.state) {
+				return { ...e.state, inputHash, usage: emptyUsage(), cacheHit: "cross-run", endedAt: Date.now() };
+			}
 			return {
 				id: cc.phaseId,
 				status: "done",
@@ -1676,6 +1689,7 @@ function recordCache(cc: PhaseCacheCtx, ps: PhaseState): void {
 		output: ps.output,
 		json: ps.json,
 		model: ps.model,
+		state: ps,
 		flowName: cc.flowName,
 		phaseId: cc.phaseId,
 		runId: cc.runId,
@@ -1832,7 +1846,9 @@ export async function recomputeTaskflow(
 	state: RunState,
 	deps: RuntimeDeps,
 	seeds: readonly string[],
-	opts: { dryRun?: boolean } = {},
+	// Fail-safe default: a real recompute overwrites the run and spends tokens.
+	// The tool/command wrappers can explicitly opt into dryRun:false.
+	opts: { dryRun?: boolean } = { dryRun: true },
 ): Promise<{ report: RecomputeReport; state: RunState }> {
 	const reads = readMapOf(state.phases);
 	const frontier = computeStaleFrontier(reads, seeds);
@@ -1855,6 +1871,27 @@ export async function recomputeTaskflow(
 	// Real recompute: topological order over the frontier so a downstream always
 	// sees its (already-refreshed) upstreams when it re-evaluates its cache key.
 	const seedSet = new Set(seeds);
+
+	// Guard: observed readSet only tracks `{steps.X.*}` interpolation refs. It is
+	// blind to Shared Context Tree (ctx_read/ctx_write), sub-flow internals,
+	// context: file pre-reads, and {previous.output}. Recomputing such a run
+	// with dryRun:false could silently skip phases whose deps changed outside the
+	// observed frontier and then persist a corrupted run over the original.
+	const hasUnobservedDeps = state.def.phases.some(
+		(p) =>
+			p.shareContext === true ||
+			state.def.contextSharing === true ||
+			p.type === "flow" ||
+			(p.context && p.context.length > 0),
+	);
+	if (hasUnobservedDeps) {
+		throw new Error(
+			"recompute dryRun:false is unsafe for this run: it contains dependencies " +
+				"(shareContext, flow/ctx_spawn, context: files, or {previous.output}) " +
+				"that are not tracked by the observed readSet. Use dryRun:true to inspect " +
+				"the frontier, or change the upstream phase and re-run the whole flow.",
+		);
+	}
 	const order = topoLayers(state.def.phases)
 		.flat()
 		.map((p) => p.id)

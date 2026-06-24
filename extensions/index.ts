@@ -336,7 +336,11 @@ async function runFlow(
 			persist: persistThrottled,
 			requestApproval,
 			loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
-			cacheScopeDefault: "cross-run",
+			// Cross-run cache is opt-in per phase (cache:{scope:"cross-run"}).
+			// Defaulting every real run to cross-run was reviewed out: it silently
+			// persists phase outputs and can serve stale results for phases whose
+			// agents read files at runtime (those files are not in the cache key).
+			cacheScopeDefault: "run-only",
 		});
 		// Auto-report cache savings at the end of a real run so the user sees the
 		// M1-M5 effect without running a separate /tf command.

@@ -83,7 +83,7 @@ test("recompute: early cutoff — seed output unchanged → downstream cached", 
 	// Re-run scout with the SAME mock output. scout is forced; audit/report
 	// re-evaluate their cache key — scout's output didn't move, so their
 	// inputHash is unchanged → they hit their prior (early cutoff).
-	const { report } = await recomputeTaskflow(state, deps, ["scout"]);
+	const { report } = await recomputeTaskflow(state, deps, ["scout"], { dryRun: false });
 
 	assert.deepEqual(report.rerun, ["scout"], "only the forced seed re-ran");
 	assert.deepEqual([...report.cutoff].sort(), ["audit", "report"], "downstream cached via early cutoff");
@@ -105,7 +105,7 @@ test("recompute: cascade — seed output changed → downstream re-runs", async 
 	// moves (its task interpolates scout) → audit re-runs → its output changes
 	// → report's inputHash moves → report re-runs. Full cascade.
 	scoutVersion = "V2";
-	const { report } = await recomputeTaskflow(state, deps, ["scout"]);
+	const { report } = await recomputeTaskflow(state, deps, ["scout"], { dryRun: false });
 
 	assert.deepEqual([...report.rerun].sort(), ["audit", "report", "scout"], "full cascade re-ran");
 	assert.equal(report.cutoff.length, 0, "nothing cached — every output moved");
@@ -121,7 +121,7 @@ test("recompute: a phase outside the frontier is reused untouched", async () => 
 	// Seeding `audit` (mid-chain): scout is outside the frontier (nothing about
 	// scout changes; audit doesn't get force-rerun by being a reader of scout).
 	// report reads audit → in frontier. scout is reused.
-	const { report } = await recomputeTaskflow(state, deps, ["audit"]);
+	const { report } = await recomputeTaskflow(state, deps, ["audit"], { dryRun: false });
 
 	assert.ok(!report.rerun.includes("scout") && !report.cutoff.includes("scout"));
 	assert.ok(report.reused.includes("scout"), "scout is outside the frontier → reused");
@@ -140,11 +140,51 @@ test("recompute: an aborted recompute stops early, reports aborted, re-runs noth
 	const ac = new AbortController();
 	ac.abort();
 	const abortedDeps: RuntimeDeps = { ...runDeps, signal: ac.signal };
-	const { report } = await recomputeTaskflow(state, abortedDeps, ["scout"]);
+	const { report } = await recomputeTaskflow(state, abortedDeps, ["scout"], { dryRun: false });
 
 	assert.equal(report.aborted, true, "aborted recompute is flagged");
 	assert.equal(report.rerun.length, 0, "nothing re-ran");
 	assert.equal(record.length, executedBefore, "no execution happened");
+});
+
+test("recompute: runtime defaults to dry-run (safe default)", async () => {
+	const record: string[] = [];
+	const deps = baseDeps(mockRunner((t) => `out:${t}`, record));
+	const state = mkState(DEF);
+	await executeTaskflow(state, deps);
+	const executedBefore = record.length;
+
+	// No opts passed → runtime must default to dry-run (no mutation, no tokens).
+	const { report } = await recomputeTaskflow(state, deps, ["scout"]);
+	assert.equal(report.dryRun, true, "runtime default is dry-run");
+	assert.equal(record.length, executedBefore, "dry-run does not execute");
+});
+
+test("recompute: dryRun:false is rejected for runs with unobserved deps", async () => {
+	const record: string[] = [];
+	const deps = baseDeps(mockRunner((t) => `out:${t}`, record));
+	const def: Taskflow = {
+		name: "ctx-flow",
+		phases: [
+			{ id: "scout", type: "agent", agent: "a", task: "scan" },
+			{
+				id: "reader",
+				type: "agent",
+				agent: "a",
+				task: "read",
+				context: ["README.md"],
+				dependsOn: ["scout"],
+			},
+		],
+	} as Taskflow;
+	const state = mkState(def);
+	await executeTaskflow(state, deps);
+
+	await assert.rejects(
+		() => recomputeTaskflow(state, deps, ["scout"], { dryRun: false }),
+		/unsafe for this run/,
+		"real recompute must refuse flows with context: file deps",
+	);
 });
 
 test("recompute: a non-existent seed is fail-open (empty frontier, no crash)", async () => {
@@ -153,7 +193,7 @@ test("recompute: a non-existent seed is fail-open (empty frontier, no crash)", a
 	const state = mkState(DEF);
 	await executeTaskflow(state, deps);
 
-	const { report } = await recomputeTaskflow(state, deps, ["does-not-exist"]);
+	const { report } = await recomputeTaskflow(state, deps, ["does-not-exist"], { dryRun: false });
 	// The seed isn't a phase; the frontier is just the seed itself (nothing
 	// reads it), and the loop skips it (no matching phase). No crash, no rerun.
 	assert.equal(report.rerun.length, 0);
@@ -185,7 +225,7 @@ test("recompute: loop inputHash folds upstream so changed seed re-runs loop", as
 	const executedBefore = record.length;
 
 	scoutVersion = "V2";
-	const { report } = await recomputeTaskflow(state, deps, ["scout"]);
+	const { report } = await recomputeTaskflow(state, deps, ["scout"], { dryRun: false });
 
 	assert.ok(report.rerun.includes("scout"), "seed re-ran");
 	assert.ok(report.rerun.includes("refine"), "loop re-ran because its upstream changed");
@@ -219,7 +259,7 @@ test("recompute: tournament inputHash folds upstream so changed seed re-runs tou
 	const executedBefore = record.length;
 
 	scoutVersion = "V2";
-	const { report } = await recomputeTaskflow(state, deps, ["scout"]);
+	const { report } = await recomputeTaskflow(state, deps, ["scout"], { dryRun: false });
 
 	assert.ok(report.rerun.includes("scout"), "seed re-ran");
 	assert.ok(report.rerun.includes("pick"), "tournament re-ran because its upstream changed");
