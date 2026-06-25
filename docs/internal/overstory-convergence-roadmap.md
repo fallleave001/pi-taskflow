@@ -101,6 +101,22 @@ M1 FlowIR shadow ──▶ M2 declared readSet ──▶ M3 observed readSet@ver
   (contract seam)      (content-addressed)     (overstory moat)              (cascade algorithm)   (Make→Bazel flagship)
 ```
 
+### Status — H1 landed (as of v0.0.26)
+
+> The table further below is the original **design intent**. H1 (M1+M2
+> foundation + cache-key migration) shipped in v0.0.26. Honest status:
+
+| # | Status | What actually shipped | Remaining for full milestone |
+|---|---|---|---|
+| **M1** | 🟡 **seam landed (stub translate)** | `compileTaskflowToIR(def) → {ir, meta, hash, usedFallbackHash, warnings, errors}` typed surface (`extensions/flowir/{index,translate,meta}.ts`); `/tf ir <flow>` command + `ir` tool action; determinism + stub-parity tests; `e2e-flowir.mts`. Runtime routes `flowDefHash` through the seam. | Vendor overstory's genuine `ir/{compile,cond,hash,schema}` compiler so `usedFallbackHash` flips `false` and a real **byte-parity** test vs a pinned overstory commit exists. Until then hash == `flowDefHash` (fallback). |
+| **M2** | 🟢 **declared plane landed** | Per-phase `DeclaredDeps {reads,writes}` synthesized at compile time (`collectRefs` over task/over/when/until/eval/branches/with/context + `dependsOn`), attached to `ir.meta.declaredDeps`, persisted to `RunState`. M5 recompute frontier now uses **union(observed ∪ declared)** (`stale.ts` 3-arg `computeStaleFrontier` + property test). | Reconcile declared-vs-observed discrepancies as advisory diagnostics (RFC-004); not blocking. |
+| **Cache** | 🟢 **backward-compatible migration** | `cacheKey` is now versioned (`v2:flowdef:`) with a **3-tier lookup**: new key → bare `flowdef:` key → legacy (no-flowdef) key. Pre-existing cross-run entries still hit for one release cycle; no write-through on fallback. No cross-flow collision (every tier includes `flow:${name}`). | Advance to `v3:` when the genuine IR hash lands. |
+| **M3** | 🟢 shipped (v0.0.25) | `onRead` hook, `PhaseState.reads`, provenance/why-stale, when/eval read capture. | — |
+| **M4** | 🟢 shipped | `computeStaleFrontier` pure fn + property test. | — |
+| **M5** | 🟢 trustworthy (v0.0.25) | `/tf recompute` (dry-run default), union frontier, self-read deadlock fixed, unobserved-deps guard. | Flip default-on after the flagship "strictly < full" demo; precise `ir-changed` diff; map item-level reuse. |
+
+---
+
 | # | Milestone | Core change | Tests+e2e gate | overstory alignment | Releasable? |
 |---|---|---|---|---|---|
 | **M1** | **FlowIR shadow + `/tf ir`** | New `extensions/flowir/*` (vendored genuine compiler + translate bridge). `/tf ir <flow>` emits compiled IR + `flowIRHash` + structured `CompileError[]`. **Zero change to the 9 phase branches.** | existing suite zero-diff; new `flowir.test.ts` (property determinism + hash sensitivity + **byte-parity** vs overstory pinned commit); `sync-flowir.mjs --check` green; `/tf ir` e2e non-empty hash | ~10% — FlowIR types/hash shared | ✅ purely additive new command |

@@ -2,6 +2,64 @@
 
 All notable changes to pi-taskflow are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [0.0.26] — 2026-06-25
+
+> Foundation release: **the convergence roadmap's H1 lands** — a real FlowIR
+> compile seam (M1), a declared dependency plane (M2), and a
+> backward-compatible cache-key migration. v0.0.25 made incremental recompute
+> *trustworthy*; this release makes the contract underneath it *real*: the
+> recompute frontier now reasons over **observed ∪ declared** dependencies, the
+> flow definition compiles through a typed IR surface instead of an inlined
+> hash, and folding the definition into the cache key no longer evicts every
+> pre-existing cross-run entry.
+
+### Added
+- **FlowIR compile seam (M1).** New `extensions/flowir/{index,translate,meta}.ts`
+  exposes `compileTaskflowToIR(def) → { ir, meta, hash, usedFallbackHash,
+  warnings, errors }` — a typed, never-throwing projection of a desugared flow
+  into a content-addressed IR. The runtime now routes `flowDefHash` through this
+  seam instead of inlining it. `translate` is currently a 1:1 stub projection
+  (so `usedFallbackHash` is `true` and the hash equals the vendored
+  `flowDefHash`); it becomes the genuine overstory compiler once that kernel is
+  vendored, at which point the cache-key version advances `v2: → v3:`.
+- **`/tf ir <flow>` command + `ir` tool action.** Renders the compiled IR plus
+  its hash and any structured `CompileError[]` — zero tokens, no LLM.
+- **Declared dependency plane (M2).** `compileTaskflowToIR` synthesizes per-phase
+  `DeclaredDeps { reads, writes }` from interpolation refs
+  (`task`/`over`/`when`/`until`/`eval`/`branches`/`with`/`context`) and
+  `dependsOn`, attaches them to `ir.meta.declaredDeps`, and persists them to
+  `RunState`. `/tf recompute` now computes its stale frontier over
+  **union(observed ∪ declared)** rather than observed-only — a dependency that
+  was declared but never interpolated at runtime is no longer missed.
+- **Tests: 753 → 802** (+49) across new suites: `flowir.test.ts`,
+  `flowir-declared.test.ts`, `stale-union.test.ts` (incl. a 500-iteration
+  property test proving the union frontier is never narrower than observed-only),
+  `recompute-union.test.ts`, `cache-migration.test.ts`, plus `e2e-flowir.mts`
+  and `e2e-cache-migration.mts`.
+
+### Fixed
+- **Cache-key migration no longer evicts existing cross-run entries.** Folding
+  `flowdef:` into the key previously invalidated every pre-existing cross-run
+  cache entry on upgrade (a one-time miss-storm). `cacheKey` is now versioned
+  (`v2:flowdef:`) with a **3-tier lookup**: new key → bare `flowdef:` key →
+  legacy (no-flowdef) key. Old entries still hit for one release cycle; there is
+  no write-through on a fallback hit (legacy entries age out naturally), and
+  every tier still includes `flow:${name}` so two different flows can never
+  collide.
+- **Declared plane and recompute guard now see `loop.until` and `gate.eval`.**
+  `collectRefs` skipped `until` (loop convergence) and `eval[]` (gate zero-token
+  checks), so a dependency expressed only in those fields was absent from the
+  declared plane and from the `dryRun:false` unobserved-dependency guard. Both
+  are now scanned. (Closes the two MEDIUM findings from the H1 risk review.)
+
+### Compatibility
+- **Backward compatible.** `RunState.flowDefHash` and `RunState.declaredDeps`
+  are optional — pre-0.0.26 run states load unchanged. A compile/hash failure
+  fails open: `usedFallbackHash` stays set, cross-run cache is disabled for that
+  run, and the key degrades to a flow-scoped (collision-free) form. The one
+  observable change on upgrade is a single re-execution of in-flight phases
+  whose stored `inputHash` predates the `v2:` prefix.
+
 ## [0.0.25] — 2026-06-24
 
 > Correctness release: **incremental recompute is now trustworthy.** `/tf
