@@ -9,7 +9,7 @@ git clone git@github.com:heggria/pi-taskflow.git
 cd pi-taskflow
 npm install
 npm run typecheck   # TypeScript checks (no build needed)
-npm test            # 864 tests, all passing
+npm test            # 872 tests, all passing
 ```
 
 > The pi end-to-end suites (`packages/pi-taskflow/test/e2e*.mts`) spawn live Pi subagents and are run directly with `node --conditions=development --experimental-strip-types <file>`. They need `pi` installed and model access configured. CI runs unit tests only.

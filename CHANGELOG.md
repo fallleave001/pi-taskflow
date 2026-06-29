@@ -2,7 +2,7 @@
 
 All notable changes to pi-taskflow are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-## [0.1.1] — Unreleased
+## [0.1.1] — 2026-06-29
 
 ### Fixed
 - **Foreground taskflow runs silently executed no phase** (issue #3, broadest
