@@ -23,10 +23,16 @@
     "directory": "packages/codex-taskflow"
   },
   "type": "module",
+  "main": "./dist/codex-runner.js",
+  "types": "./dist/codex-runner.d.ts",
   "bin": {
-    "codex-taskflow-mcp": "./src/mcp/bin.ts"
+    "codex-taskflow-mcp": "./dist/mcp/bin.js"
   },
-  "files": ["src"],
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
   "publishConfig": {
     "access": "public"
   },

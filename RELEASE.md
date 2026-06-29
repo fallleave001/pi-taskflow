@@ -28,9 +28,15 @@ npm whoami --registry=https://registry.npmjs.org/   # expect: heggria (or the ow
 
 ```sh
 npm install            # links the workspaces
-npm run typecheck      # 0 errors
+npm run typecheck      # 0 errors (resolves taskflow-core to src via the dev condition)
 npm test               # 864/864 green
+npm run build          # emit dist/ for all three packages (tsc → .js + .d.ts)
 ```
+
+> **Why a build step.** Node refuses to type-strip `.ts` files under
+> `node_modules`, so the published packages ship compiled `dist/*.js` + `.d.ts`.
+> `prepublishOnly` runs `npm run build` automatically, so `npm publish` always
+> publishes fresh output even if you skip the manual build above.
 
 ## Publish (order matters)
 

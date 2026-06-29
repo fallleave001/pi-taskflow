@@ -32,6 +32,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Build all packages (emit dist)
+        run: npm run build
+
       - name: Verify tag matches workspace versions
         run: |
           TAG="${GITHUB_REF_NAME}"

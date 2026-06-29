@@ -26,9 +26,14 @@ All notable changes to pi-taskflow are documented here. This project follows [Ke
 - **`pi-taskflow` is now the Pi adapter package** (same published name — existing
   `pi install npm:pi-taskflow` users are unaffected). It depends on
   `taskflow-core`.
-- Repo restructured to **npm workspaces** under `packages/*` (no build step; the
-  source still runs directly via `--experimental-strip-types`). CI publishes the
-  three packages in dependency order (core → pi → codex) on a `v*` tag.
+- Repo restructured to **npm workspaces** under `packages/*`. Each package now
+  **builds to `dist/` (`tsc` → `.js` + `.d.ts`)** and publishes the compiled
+  output — required because Node refuses to type-strip `.ts` under `node_modules`.
+  Dev still runs the TypeScript sources directly (a `development` export
+  condition + `--conditions=development` resolves `taskflow-core` to `src`, so a
+  fresh clone runs `typecheck`/`test` with no build step). CI builds and
+  publishes the three packages in dependency order (core → pi → codex) on a
+  `v*` tag.
 
 ### Notes
 - All 864 tests pass across the three packages (713 core + 135 pi + 16 codex).

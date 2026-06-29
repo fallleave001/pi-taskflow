@@ -982,7 +982,7 @@ export default function (pi: ExtensionAPI) {
 				// from the installed package so it works under workspaces and when
 				// pi-taskflow is installed from npm.
 				const runnerScript = (await import("node:url")).fileURLToPath(
-					import.meta.resolve("taskflow-core/detached-runner.ts"),
+					import.meta.resolve("taskflow-core/detached-runner.js"),
 				);
 				const child = spawn(process.execPath, ["--experimental-strip-types", runnerScript, tmpFile], {
 					detached: true,

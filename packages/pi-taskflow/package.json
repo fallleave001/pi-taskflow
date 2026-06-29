@@ -27,12 +27,18 @@
     "directory": "packages/pi-taskflow"
   },
   "type": "module",
-  "files": ["src", "skills"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "skills"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
   "publishConfig": {
     "access": "public"
   },
   "pi": {
-    "extensions": ["./src/index.ts"],
+    "extensions": ["./dist/index.js"],
     "skills": ["./skills"],
     "image": "https://raw.githubusercontent.com/heggria/pi-taskflow/main/assets/social-preview.png"
   },
