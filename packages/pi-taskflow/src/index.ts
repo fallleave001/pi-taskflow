@@ -26,6 +26,7 @@ import {
 import { Type } from "typebox";
 import { type AgentScope, discoverAgents, readSubagentSettings, shouldSyncBuiltinAgentsToProject, syncBuiltinAgentsToProject } from "taskflow-core";
 import { renderRunResult, summarizeRun } from "./render.ts";
+import { piSubagentRunner } from "./runner.ts";
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
 import { ApprovalViewComponent, type ApprovalChoice } from "./approval-view.ts";
 import { executeTaskflow, recomputeTaskflow, summarizeReuse, type ApprovalDecision, type ApprovalRequest, type RecomputeReport, type RuntimeDeps, type RuntimeResult } from "taskflow-core";
@@ -404,6 +405,11 @@ async function runFlow(
 			globalThinking: settings.globalThinking,
 			signal,
 			persist: persistThrottled,
+			// Inject the pi subagent runner. Core is host-neutral and its default
+			// runTask is a no-op stub, so every host MUST inject its own — omitting
+			// this (as the pre-refactor code could, when the default was runAgentTask
+			// in the same package) now silently breaks all phase execution.
+			runTask: piSubagentRunner.runTask,
 			requestApproval,
 			loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
 			// Cross-run cache is opt-in. By default a real run is `run-only` (fresh
@@ -841,6 +847,7 @@ export default function (pi: ExtensionAPI) {
 					agents,
 					globalThinking: settings.globalThinking,
 					signal,
+					runTask: piSubagentRunner.runTask,
 					loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
 				};
 				const { report, state } = await recomputeTaskflow(prev, deps, [String(params.phaseId)], { dryRun });
@@ -1239,6 +1246,7 @@ export default function (pi: ExtensionAPI) {
 					cwd: ctx.cwd,
 					agents,
 					globalThinking: settings.globalThinking,
+					runTask: piSubagentRunner.runTask,
 					loadFlow: (name: string) => getFlow(ctx.cwd, name)?.def,
 				};
 				if (apply) {

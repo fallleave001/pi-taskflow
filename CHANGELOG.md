@@ -5,6 +5,16 @@ All notable changes to pi-taskflow are documented here. This project follows [Ke
 ## [0.1.1] — Unreleased
 
 ### Fixed
+- **Foreground taskflow runs silently executed no phase** (issue #3, broadest
+  impact — found during the regression sweep). The same default-runner change
+  that broke detached runs also broke `runFlow` (every foreground run) and both
+  `recomputeTaskflow` paths in `pi-taskflow/src/index.ts`: they constructed
+  `RuntimeDeps` without a `runTask`, so every phase hit the `noRunnerInjected`
+  stub. Pre-refactor this worked only because the engine's default `runTask`
+  was `runAgentTask` (same package). Fixed by explicitly injecting
+  `piSubagentRunner.runTask` at all three call sites. Added a structural
+  regression test that scans the production source and fails if any
+  `executeTaskflow`/`recomputeTaskflow` deps omits `runTask`.
 - **Detached (background) runs crashed on launch** (issue #3). The detached
   runner specifier resolved to `dist/detached-runner.js.js` (double `.js`) under
   taskflow-core's `"./*"` export rewrite, so the spawned child died at import
@@ -12,15 +22,12 @@ All notable changes to pi-taskflow are documented here. This project follows [Ke
   (`taskflow-core/detached-runner`) → `dist/detached-runner.js`. The stale
   `--experimental-strip-types` flag (the runner ships compiled) is dropped.
 - **Detached runs could never execute any phase** (issue #3, deeper). The
-  pre-refactor runtime defaulted `runTask` to `runAgentTask` (same package), but
-  the host-neutral split changed that default to a `noRunnerInjected` stub — and
-  `detached-runner.ts` called `executeTaskflow` with no `runTask`, so every
-  detached phase failed with "No subagent runner injected" even after the module
-  loaded. Fixed: the host (pi `index.ts`) now serializes a `runnerModule`/
-  `runnerExport` (resolved from its own package, so it works under both workspaces
-  and npm installs) into the detached context file, and the detached-runner
-  dynamically imports it and injects `runTask`. Core stays host-neutral — it
-  learns the runner from the host at runtime.
+  detached-runner called `executeTaskflow` with no `runTask` (see the default
+  above), so every detached phase failed with "No subagent runner injected" even
+  after the module loaded. Fixed: the host serializes a `runnerModule`/
+  `runnerExport` (resolved from its own package, works under both workspaces and
+  npm installs) into the detached context file, and the detached-runner
+  dynamically imports it and injects `runTask`.
 - **A crashed detached runner no longer leaves the run stuck at `running`
   forever** (issue #3, secondary). The host now pipes stderr and attaches
   `exit`/`error` handlers that, when the child dies before reaching a terminal
