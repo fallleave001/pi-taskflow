@@ -2,7 +2,7 @@
 
 All notable changes to pi-taskflow are documented here. This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-## [0.1.2] — Unreleased
+## [0.1.2] — 2026-06-30
 
 ### Fixed
 - **codex-taskflow MCP server failed every phase with `Model metadata for
